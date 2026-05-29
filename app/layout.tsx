@@ -1,0 +1,53 @@
+import type { Metadata, Viewport } from "next";
+import { Inter } from "next/font/google";
+import "./globals.css";
+import { Toaster } from "sonner";
+
+const inter = Inter({
+  subsets: ["latin", "latin-ext"],
+  variable: "--font-inter",
+  display: "swap",
+});
+
+export const metadata: Metadata = {
+  title: "İLANLA — Sahibinden Analiz & İlan yayınlama projesi",
+  description:
+    "Araç parçası görselini otomatik ilana dönüştüren akıllı sistem.",
+  keywords: ["araç parçası", "sahibinden", "ilan", "AI"],
+  authors: [{ name: "İLANLA" }],
+  robots: "noindex, nofollow",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  themeColor: "#0d1117",
+  colorScheme: "dark",
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="tr" className={`dark ${inter.variable}`} suppressHydrationWarning>
+      <head>
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta
+          name="apple-mobile-web-app-status-bar-style"
+          content="black-translucent"
+        />
+        <meta name="format-detection" content="telephone=no" />
+      </head>
+      <body
+        className={`${inter.className} min-h-dvh bg-[#0d1117] text-white antialiased overscroll-none`}
+        suppressHydrationWarning
+      >
+        {children}
+        <Toaster theme="dark" position="bottom-right" richColors />
+      </body>
+    </html>
+  );
+}
