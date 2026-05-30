@@ -37,6 +37,11 @@ export interface BotSettings {
   // ── Bildirimler ──────────────────────────────────────────────────────────
   notifyOnSuccess: boolean;
   notifyOnError: boolean;
+
+  // ── Telegram ─────────────────────────────────────────────────────────────
+  telegramBotToken: string;
+  telegramChatId: string;
+  telegramNotifyInterval: number;
 }
 
 export const DEFAULT_SETTINGS: BotSettings = {
@@ -54,7 +59,7 @@ export const DEFAULT_SETTINGS: BotSettings = {
   defaultCondition: "Sıfır",
   defaultExchangeable: "Evet",
 
-  defaultTown: "Maltepe",
+  defaultTown: "",
   defaultQuarter: "",
 
   priceAdjustPercent: 0,
@@ -67,6 +72,10 @@ export const DEFAULT_SETTINGS: BotSettings = {
 
   notifyOnSuccess: true,
   notifyOnError: true,
+
+  telegramBotToken: "",
+  telegramChatId: "",
+  telegramNotifyInterval: 10,
 };
 
 const SETTINGS_PATH = path.join(process.cwd(), "data", "bot-settings.json");

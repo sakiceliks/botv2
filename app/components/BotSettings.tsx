@@ -14,6 +14,7 @@ import {
   Bell,
   Eye,
   ToggleLeft,
+  Send,
   ChevronDown,
   Save,
   RotateCcw,
@@ -53,6 +54,9 @@ const DEFAULT: BotSettings = {
   headless: false,
   notifyOnSuccess: true,
   notifyOnError: true,
+  telegramBotToken: "",
+  telegramChatId: "",
+  telegramNotifyInterval: 10,
 };
 
 // ── Yardımcı Bileşenler ─────────────────────────────────────────────────────
@@ -685,6 +689,77 @@ export function BotSettings() {
               onChange={(v) => patch("notifyOnError", v)}
             />
           </div>
+        </div>
+      </SectionCard>
+
+      {/* ── Telegram ── */}
+      <SectionCard
+        icon={Send}
+        title="Telegram Bildirimleri"
+        subtitle="Her X ilanda bir Telegram'a rapor gönder"
+        defaultOpen={false}
+      >
+        <InputField
+          label="Bot Token"
+          hint="@BotFather'dan aldığın bot token'ı"
+          value={settings.telegramBotToken}
+          onChange={(v) => patch("telegramBotToken", v)}
+          placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+        />
+
+        <InputField
+          label="Chat ID"
+          hint="Bildirimlerin gönderileceği chat/grup ID'si"
+          value={settings.telegramChatId}
+          onChange={(v) => patch("telegramChatId", v)}
+          placeholder="-1001234567890"
+        />
+
+        <SelectField
+          label="Bildirim Aralığı"
+          hint="Kaç ilandan bir Telegram'a rapor gönderilsin"
+          value={settings.telegramNotifyInterval}
+          onChange={(v) => patch("telegramNotifyInterval", parseInt(v))}
+          options={[
+            { label: "Her 5 ilan", value: 5 },
+            { label: "Her 10 ilan", value: 10 },
+            { label: "Her 20 ilan", value: 20 },
+            { label: "Her 50 ilan", value: 50 },
+          ]}
+        />
+
+        <div className="sm:col-span-2">
+          <button
+            type="button"
+            onClick={async () => {
+              if (!settings.telegramBotToken || !settings.telegramChatId) {
+                toast.error("Bot Token ve Chat ID doldurun");
+                return;
+              }
+              try {
+                const res = await fetch("/api/telegram/test", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    token: settings.telegramBotToken,
+                    chatId: settings.telegramChatId,
+                  }),
+                });
+                const data = await res.json();
+                if (data.ok) {
+                  toast.success("Telegram test mesajı gönderildi!");
+                } else {
+                  toast.error("Telegram hatası: " + (data.error || "Bilinmeyen"));
+                }
+              } catch {
+                toast.error("Telegram test bağlantı hatası");
+              }
+            }}
+            className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border border-blue-500/30 bg-blue-500/10 text-blue-400 text-xs font-bold hover:bg-blue-500/20 transition-colors"
+          >
+            <Send className="w-3.5 h-3.5" />
+            Test Mesajı Gönder
+          </button>
         </div>
       </SectionCard>
 

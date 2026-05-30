@@ -1,0 +1,6 @@
+{
+  "port": 9222,
+  "targetUrl": "https://banaozel.sahibinden.com/",
+  "userDataDir": "/Users/sakicelik/.nextbot/chrome-profile",
+  "executablePath": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+}

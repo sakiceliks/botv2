@@ -20,10 +20,12 @@ interface AuthResult {
   status: AuthStatus;
   browserRunning: boolean;
   message: string;
+  storeName?: string;
 }
 
 export function SahibindenAuthStatus() {
   const [status, setStatus] = useState<AuthStatus>("checking");
+  const [storeName, setStoreName] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const fetchStatus = async () => {
@@ -32,6 +34,7 @@ export function SahibindenAuthStatus() {
       const data: AuthResult = await res.json();
       if (data.ok) {
         setStatus(data.status);
+        setStoreName(data.storeName || null);
       } else {
         setStatus("unknown");
       }
@@ -74,7 +77,7 @@ export function SahibindenAuthStatus() {
     switch (status) {
       case "logged-in":
         return {
-          label: "Oturum Açık",
+          label: storeName || "Oturum Açık",
           icon: UserCheck,
           color: "text-[#11F08E]",
           bgColor: "bg-[#11F08E]/10",

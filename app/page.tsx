@@ -172,15 +172,27 @@ export default function Home() {
     console.log("[BOT] 🚀 Kuyruk başlatıldı");
 
     let maxRetries = 2;
+    let telegramInterval = 10;
     try {
       const settingsRes = await fetch("/api/settings");
       const settingsData = await settingsRes.json();
-      if (settingsData.ok && settingsData.settings?.maxRetries != null) {
-        maxRetries = settingsData.settings.maxRetries;
+      if (settingsData.ok) {
+        if (settingsData.settings?.maxRetries != null) {
+          maxRetries = settingsData.settings.maxRetries;
+        }
+        if (settingsData.settings?.telegramNotifyInterval) {
+          telegramInterval = settingsData.settings.telegramNotifyInterval;
+        }
       }
     } catch { /* use default */ }
 
     let items = [...queueItemsRef.current];
+    let batchSuccessCount = 0;
+    let batchErrorCount = 0;
+    let batchProcessed = 0;
+    let batchNumber = 0;
+    const batchErrorDetails: string[] = [];
+
     for (let i = 0; i < items.length; i++) {
       if (queueAbortRef.current) {
         console.log("[BOT] 🛑 Kuyruk kullanıcı tarafından durduruldu");
@@ -229,6 +241,7 @@ export default function Home() {
             );
             toast.success("İlan başarıyla yüklendi", { description: `${items[i].draft.name} (${duration})` });
             success = true;
+            batchSuccessCount++;
             break;
           } else {
             lastError = data.error;
@@ -241,6 +254,8 @@ export default function Home() {
       }
 
       if (!success) {
+        batchErrorCount++;
+        batchErrorDetails.push(`${items[i].draft.name}: ${lastError || "Bilinmeyen hata"}`);
         setQueueItems((prev) =>
           prev.map((it, idx) => (idx === i ? {
             ...it,
@@ -251,8 +266,41 @@ export default function Home() {
         toast.error(`Yayınlama hatası (${maxRetries + 1} deneme)`, { description: lastError });
       }
 
+      batchProcessed++;
+
+      if (batchProcessed > 0 && batchProcessed % telegramInterval === 0) {
+        batchNumber++;
+        fetch("/api/telegram/notify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            successCount: batchSuccessCount,
+            errorCount: batchErrorCount,
+            totalProcessed: batchProcessed,
+            batchNumber,
+            errorDetails: batchErrorDetails,
+          }),
+        }).catch(() => {});
+        batchErrorDetails.length = 0;
+      }
+
       // Wait between items
       await new Promise((r) => setTimeout(r, 2000));
+    }
+
+    if (batchProcessed > 0 && batchProcessed % telegramInterval !== 0) {
+      batchNumber++;
+      fetch("/api/telegram/notify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          successCount: batchSuccessCount,
+          errorCount: batchErrorCount,
+          totalProcessed: batchProcessed,
+          batchNumber,
+          errorDetails: batchErrorDetails,
+        }),
+      }).catch(() => {});
     }
 
     setQueueRunning(false);

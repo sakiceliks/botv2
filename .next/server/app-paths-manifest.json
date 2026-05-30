@@ -1,8 +1,0 @@
-{
-  "/api/upload/route": "app/api/upload/route.js",
-  "/api/mock-images/[name]/route": "app/api/mock-images/[name]/route.js",
-  "/api/queue/route": "app/api/queue/route.js",
-  "/api/mock-images/route": "app/api/mock-images/route.js",
-  "/api/browser/status/route": "app/api/browser/status/route.js",
-  "/page": "app/page.js"
-}

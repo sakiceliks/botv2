@@ -12,11 +12,18 @@ export async function POST(request: Request) {
     }
 
     const savedImage = await saveFormFile(file);
-    const { imageUrl } = await uploadToImgbb(savedImage.fullPath);
+
+    let imageUrl = "";
+    try {
+      const result = await uploadToImgbb(savedImage.fullPath);
+      imageUrl = result.imageUrl;
+    } catch (err) {
+      console.warn("[API/UPLOAD] ImgBB yükleme başarısız, yerel dosya kullanılacak:", err instanceof Error ? err.message : err);
+    }
 
     return NextResponse.json({
       ok: true,
-      imageUrl,
+      imageUrl: imageUrl || `/uploads/${savedImage.relativePath.replace(/^.*[/\\]/, "")}`,
       imagePath: savedImage.relativePath,
     });
   } catch (error) {

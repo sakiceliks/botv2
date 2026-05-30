@@ -173,23 +173,72 @@ function guessMimeTypeFromPath(filePath: string) {
   return "image/jpeg";
 }
 
+async function uploadViaCDP(page: Page, inputSelector: string, imagePath: string, logs: string[]) {
+  const client = await page.createCDPSession();
+  try {
+    const { root } = await client.send("DOM.getDocument");
+    const { nodeId } = await client.send("DOM.querySelector", {
+      nodeId: root.nodeId,
+      selector: inputSelector,
+    });
+
+    if (!nodeId) {
+      addLog(logs, "CDP: Input element bulunamadı.", "WARN");
+      return false;
+    }
+
+    await client.send("DOM.setFileInputFiles", {
+      files: [imagePath],
+      nodeId,
+    });
+
+    await page.evaluate((sel) => {
+      const input = document.querySelector(sel) as HTMLInputElement;
+      if (!input) return;
+
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+
+      const win = window as any;
+      if (win.angular && input.files && input.files.length > 0) {
+        try {
+          const el = win.angular.element(input);
+          const scope = el.scope();
+          if (scope) {
+            const fnNames = ["onFileSelect", "onFileSelected", "handleFileSelect", "uploadFile", "addPhoto"];
+            for (const fn of fnNames) {
+              if (typeof scope[fn] === "function") {
+                scope.$apply(() => { scope[fn](input.files); });
+                break;
+              }
+            }
+          }
+        } catch {}
+      }
+    }, inputSelector);
+
+    addLog(logs, "CDP: DOM.setFileInputFiles ile dosya atandı ve Angular tetiklendi.", "OK");
+    return true;
+  } catch (err) {
+    addLog(logs, `CDP upload hatası: ${err instanceof Error ? err.message : "?"}`, "WARN");
+    return false;
+  } finally {
+    await client.detach().catch(() => {});
+  }
+}
+
 async function injectImageViaBase64(page: Page, inputSelector: string, imagePath: string) {
   const fileName = path.basename(imagePath);
   const mimeType = guessMimeTypeFromPath(imagePath);
   const base64Data = fs.readFileSync(imagePath).toString("base64");
 
   const result = await page.evaluate(async ({ selector, b64, fileName: innerName, mimeType: innerMime }) => {
-    console.log(`[INJECT] Basliyor... Selector: ${selector}`);
     const input = document.querySelector(selector) as HTMLInputElement;
     if (!input) {
-      console.error(`[INJECT] HATA: Input bulunamadi! Selector: ${selector}`);
       return { ok: false, reason: "input-not-found" };
     }
 
     try {
-      console.log(`[INJECT] Input bulundu. Disabled: ${input.disabled}, Visibility: ${input.style.display}`);
-      
-      // Create File and DataTransfer
       const binary = atob(b64);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i += 1) {
@@ -198,62 +247,42 @@ async function injectImageViaBase64(page: Page, inputSelector: string, imagePath
       const file = new File([bytes], innerName, { type: innerMime });
       const dt = new DataTransfer();
       dt.items.add(file);
-      console.log(`[INJECT] File nesnesi olusturuldu: ${innerName} (${file.size} bytes)`);
 
-      // Set files to input
       input.files = dt.files;
-      console.log(`[INJECT] input.files atandi. Yeni uzunluk: ${input.files.length}`);
 
-      // Trigger initialization click
-      console.log("[INJECT] MouseEvent(click) gonderiliyor...");
-      input.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-
-      // Dispatch events
-      console.log("[INJECT] Change eventleri hazirlaniyor...");
-      const changeEvent = new Event("change", { bubbles: true });
-      Object.defineProperty(changeEvent, "target", { writable: false, value: input });
-      Object.defineProperty(changeEvent, "files", { writable: false, value: dt.files });
-      
-      const dropEvent = new DragEvent("drop", {
-        bubbles: true,
-        cancelable: true,
-        dataTransfer: dt
-      });
-
+      input.dispatchEvent(new Event("change", { bubbles: true }));
       input.dispatchEvent(new Event("input", { bubbles: true }));
-      console.log("[INJECT] 'input' event gonderildi.");
-      input.dispatchEvent(changeEvent);
-      console.log("[INJECT] 'change' event gonderildi (files property ile).");
-      
-      const container = input.closest(".upload-image-container");
+
+      const container = input.closest(".upload-image-container, .photo-upload-wrapper, [class*='upload']");
       if (container) {
-        console.log("[INJECT] Kapsayici container bulundu, drop event gonderiliyor...");
+        const dropEvent = new DragEvent("drop", {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer: dt
+        });
         container.dispatchEvent(dropEvent);
       }
 
-      // Angular specific fallback
       const win = window as any;
       if (win.angular) {
         try {
           const el = win.angular.element(input);
           const scope = el.scope();
-          if (scope && typeof scope.onFileSelect === "function") {
-            scope.$apply(() => {
-              scope.onFileSelect(dt.files);
-            });
-            console.log("[INJECT] Angular scope.onFileSelect dogrudan tetiklendi.");
+          if (scope) {
+            const fnNames = ["onFileSelect", "onFileSelected", "handleFileSelect", "uploadFile", "addPhoto"];
+            for (const fn of fnNames) {
+              if (typeof scope[fn] === "function") {
+                scope.$apply(() => { scope[fn]([file]); });
+                console.log(`[INJECT] Angular scope.${fn} tetiklendi.`);
+                break;
+              }
+            }
           }
-        } catch (angularErr) {
-          console.warn("[INJECT] Angular tetikleme hatasi:", angularErr);
-        }
+        } catch {}
       }
-
-      input.dispatchEvent(new Event("blur", { bubbles: true }));
-      console.log("[INJECT] Enjeksiyon tamamlandi.");
 
       return { ok: true, selectedFiles: input.files ? input.files.length : 0 };
     } catch (e) {
-      console.error(`[INJECT] Kritik Hata: ${String(e)}`);
       return { ok: false, reason: String(e) };
     }
   }, {
@@ -347,46 +376,78 @@ async function persistDebugScreenshot(page: Page, logs: string[]) {
 }
 
 async function clickCategoryItem(page: Page, label: string) {
+  // Elementin doğrudan (own) text'ini al — child element text'leri hariç
+  function getOwnTextJS() {
+    return `
+      function getOwnText(el) {
+        let text = "";
+        for (const node of el.childNodes) {
+          if (node.nodeType === 3) text += node.textContent;
+        }
+        return text.replace(/\\s+/g, " ").trim().toLowerCase();
+      }
+    `;
+  }
+
   await page.waitForFunction(
     (targetLabel: string) => {
-      const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
-      const spans = Array.from(
-        document.querySelectorAll<HTMLElement>(
-          "li.breadcrumb-item span.ng-binding, li.breadcrumb-item span",
-        ),
-      );
+      const normalize = (v: string) => v.replace(/\s+/g, " ").trim().toLowerCase();
+      const target = normalize(targetLabel);
 
-      return spans.some(
-        (span) => normalize(span.textContent ?? "") === normalize(targetLabel),
-      );
+      function getOwnText(el: HTMLElement): string {
+        let text = "";
+        for (const node of el.childNodes) {
+          if (node.nodeType === 3) text += node.textContent;
+        }
+        return text.replace(/\s+/g, " ").trim().toLowerCase();
+      }
+
+      const all = Array.from(document.querySelectorAll<HTMLElement>("li, a, span"));
+      return all.some((el) => {
+        const own = getOwnText(el);
+        const full = normalize(el.textContent ?? "");
+        return own === target || full === target;
+      });
     },
-    { timeout: 20_000 },
+    { timeout: 30_000 },
     label,
   );
 
   const clicked = await page.evaluate((targetLabel: string) => {
-    const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
-    const items = Array.from(
-      document.querySelectorAll<HTMLElement>("li.breadcrumb-item"),
-    );
-    const match = items.find((item) => {
-      const span = item.querySelector<HTMLElement>("span.ng-binding, span");
-      return (
-        normalize(span?.textContent ?? item.innerText ?? "") ===
-        normalize(targetLabel)
-      );
-    });
+    const normalize = (v: string) => v.replace(/\s+/g, " ").trim().toLowerCase();
+    const target = normalize(targetLabel);
 
-    if (!match) {
-      return false;
+    function getOwnText(el: HTMLElement): string {
+      let text = "";
+      for (const node of el.childNodes) {
+        if (node.nodeType === 3) text += node.textContent;
+      }
+      return text.replace(/\s+/g, " ").trim().toLowerCase();
     }
+
+    const candidates = Array.from(document.querySelectorAll<HTMLElement>(
+      "li a, li span, li label, li, a, span.ng-binding, span"
+    ));
+
+    // 1. Doğrudan (own) text tam eşleşme — en güvenilir
+    let match = candidates.find((el) => getOwnText(el) === target);
+
+    // 2. Full textContent tam eşleşme — sadece leaf node'lar (child element sayısı az)
+    if (!match) {
+      match = candidates.find((el) => {
+        const childElements = el.querySelectorAll("*").length;
+        return childElements <= 2 && normalize(el.textContent ?? "") === target;
+      });
+    }
+
+    if (!match) return { ok: false };
 
     match.scrollIntoView({ block: "center" });
     match.click();
-    return true;
+    return { ok: true, text: match.textContent?.trim() };
   }, label);
 
-  if (!clicked) {
+  if (!clicked.ok) {
     throw new Error(`Kategori bulunamadi: ${label}`);
   }
 }
@@ -1341,7 +1402,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         headless: false,
         userDataDir: getUserDataDir(),
         defaultViewport: null,
-        args: ["--start-maximized", "--remote-debugging-port=9222"],
+        args: ["--start-maximized", "--remote-debugging-port=9222", "--disable-extensions"],
       });
       shouldCloseBrowser = true;
       addLog(logs, "Yeni tarayıcı oturumu açıldı.", "OK");
@@ -1410,15 +1471,28 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       
       const imagePath = await resolveImagePath(listing);
       if (!imagePath || !fs.existsSync(imagePath)) {
-        addLog(logs, `Görsel dosyası bulunamadı! Yol: ${imagePath || "(boş)"}`, "ERROR");
+        addLog(logs, `Görsel dosyası bulunamadı veya belirtilmemiş. Yol: ${imagePath || "(boş)"}`, "WARN");
         await persistDebugScreenshot(page, logs);
       } else {
         const fileSize = fs.statSync(imagePath).size;
         addLog(logs, `Görsel doğrulandı: ${imagePath} (${(fileSize / 1024).toFixed(1)} KB)`, "OK");
 
         const getUploadedCount = async () => page.evaluate(() => {
-          const sel = '.classified-photo-list li';
-          return document.querySelectorAll(sel).length;
+          const selectors = [
+            '.classified-photo-list li',
+            '.photo-list li',
+            '.upload-photo-list li',
+            '[class*="photo-list"] li',
+            '[class*="photo"] li.photo-item',
+            '.image-list li',
+            '.photos li',
+          ];
+          for (const sel of selectors) {
+            const count = document.querySelectorAll(sel).length;
+            if (count > 0) return count;
+          }
+          const anyImg = document.querySelectorAll('.classified-photo-list li, [class*="photo"] li, [class*="image"] li, .upload-area img');
+          return anyImg.length;
         }).catch(() => 0);
 
         let beforeCount = await getUploadedCount();
@@ -1435,41 +1509,56 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
           addLog(logs, "File input bulunamadı!", "ERROR");
           await persistDebugScreenshot(page, logs);
         } else {
-          // Input'u etkinleştir (disabled ise aç) ama butona TIKLAMADAN
           await fileInput.evaluate((el) => {
             (el as any).disabled = false;
             el.removeAttribute('disabled');
           });
           addLog(logs, "File input etkinleştirildi.", "OK");
 
-          // ── Yöntem 1: Direkt uploadFile (butona tıklamadan) ──
-          let method = 'uploadFile';
+          let method = '';
+          let uploaded = beforeCount;
           let uploadSuccess = false;
-          try {
-            addLog(logs, "📤 Yöntem 1: Direkt uploadFile...", "INFO");
-            await (fileInput as any).uploadFile(imagePath);
-            // Tüm gerekli event'leri tetikle — Angular'ın algılaması için
-            await fileInput.evaluate((el) => {
-              ['input', 'change', 'blur'].forEach((ev) => el.dispatchEvent(new Event(ev, { bubbles: true })));
-            });
-            addLog(logs, "uploadFile komutu gönderildi.", "OK");
-          } catch (error) {
-            addLog(logs, `uploadFile başarısız: ${error instanceof Error ? error.message : "?"}`, "WARN");
-            addLog(logs, "FileChooser yöntemi atlanıyor (Finder açılmasını engellemek için). Base64 injection deneniyor...", "INFO");
+
+          // ── Yöntem 1: CDP DOM.setFileInputFiles + Angular tetikleme ──
+          addLog(logs, "Yöntem 1: CDP DOM.setFileInputFiles...", "INFO");
+          method = 'cdp';
+          const cdpOk = await uploadViaCDP(page, '#uploadImageField', imagePath, logs);
+          if (cdpOk) {
+            // CDP başarılı — Angular tetiklendi, network upload'ı bekle
+            addLog(logs, "CDP başarılı, upload işlemi bekleniyor...", "INFO");
+            await sleep(3000);
+            // Network üzerinden upload isteğini bekle
+            try {
+              await page.waitForFunction(
+                () => {
+                  const imgs = document.querySelectorAll('img[src*="klassifiye"], img[src*="upload"], img[src*="photo"], .classified-photo-list li, [class*="photo-list"] li, [class*="photo"] img');
+                  return imgs.length > 0;
+                },
+                { timeout: 15000 }
+              );
+              addLog(logs, "Görsel upload tamamlandı (DOM'da görsel tespit edildi).", "OK");
+            } catch {
+              addLog(logs, "Görsel DOM'da henüz görünmüyor, devam ediliyor...", "WARN");
+            }
+            uploaded = await getUploadedCount();
           }
 
-          // Yükleme sonucunu bekle — Angular'ın işlemesi için 8sn bekle
-          addLog(logs, "Görselin işlenmesi bekleniyor (8s)...", "INFO");
-          await sleep(8000);
-          let uploaded = await getUploadedCount();
-
-          // ── Yöntem 3: Base64 Injection — sadece hiç görsel yoksa dene ──
-          if (uploaded === 0) {
-            addLog(logs, "📤 Yöntem 3: Angular/Base64 Injection deneniyor...", "WARN");
-            method += '+base64';
+          // ── Yöntem 2 (sadece CDP başarısızsa): Base64 Injection ──
+          if (!cdpOk) {
+            addLog(logs, "Yöntem 2: Base64 Injection...", "WARN");
+            method = 'base64';
             const injectResult = await injectImageViaBase64(page, '#uploadImageField', imagePath);
             addLog(logs, `Injection sonucu: ${JSON.stringify(injectResult)}`, "DEBUG");
-            await sleep(4000);
+            await sleep(3000);
+            try {
+              await page.waitForFunction(
+                () => {
+                  const imgs = document.querySelectorAll('img[src*="klassifiye"], img[src*="upload"], img[src*="photo"], .classified-photo-list li, [class*="photo-list"] li, [class*="photo"] img');
+                  return imgs.length > 0;
+                },
+                { timeout: 12000 }
+              );
+            } catch {}
             uploaded = await getUploadedCount();
           }
 
@@ -1486,7 +1575,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
 
       // Fotoğraf sayfasında Devam tıkla
       addLog(logs, "Fotoğraf adımında 'Devam Et' tıklanıyor...", "INFO");
-      await sleep(1000);
+      await sleep(300);
       try {
         await clickContinueButton(page);
         await page
@@ -1530,7 +1619,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         return { ok: true, mode, logs };
       }
       addLog(logs, "Adim-2 'Devam Et' tıklanıyor...", "INFO");
-      await sleep(2000);
+      await sleep(500);
       try {
         await page.evaluate(() => {
           const btn = document.querySelector('.add-classified-submit') as HTMLButtonElement;
@@ -1730,7 +1819,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         }
       }
 
-      await sleep(600);
+      await sleep(300);
 
       // ── Model ──
       try {
@@ -1792,7 +1881,6 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         });
         if (cityResult.ok && (cityResult as any).selected) {
           addLog(logs, `İl → "İstanbul" seçildi.`, "OK");
-          await sleep(2000); // İlçelerin yüklenmesi için bekle
         }
       } catch (err) {
         addLog(logs, `İl seçimi atlandı veya hata: ${err instanceof Error ? err.message : "?"}`, "DEBUG");
@@ -1809,38 +1897,24 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         }, { timeout: 10000 }).catch(() => null);
 
         const targetTown = listing.town;
-        
+        addLog(logs, `Hedef ilçe: "${targetTown || "(boş)"}"`, "DEBUG");
+
         const townResult = await page.evaluate((target) => {
           const sel = document.querySelector('select[name="town"]') as HTMLSelectElement;
           if (!sel) return { ok: false, value: '', label: 'select bulunamadı' };
-          
-          // Boş olmayan option'ları filtrele
+
           const options = Array.from(sel.options).filter(o => o.value && o.value !== '' && o.value !== '?');
           if (options.length === 0) return { ok: false, value: '', label: 'seçenek yok' };
-          
-          // Hedef ilçe varsa onu bul, yoksa öncelikli listeden (Anadolu Yakası) seç, o da yoksa rastgele
+
           let selectedOpt = null;
-          const priorityDistricts = [
-            "Ataşehir", "Beykoz", "Çekmeköy", "Kadıköy", "Kartal", 
-            "Maltepe", "Pendik", "Sancaktepe", "Sultanbeyli", "Şile", 
-            "Tuzla", "Ümraniye", "Üsküdar"
-          ].map(d => d.toLowerCase());
 
           if (target) {
-            selectedOpt = options.find(o => o.text.toLowerCase().includes(target.toLowerCase()));
-          }
-
-          if (!selectedOpt) {
-            // Anadolu yakası ilçelerini filtrele
-            const priorityOptions = options.filter(o => 
-              priorityDistricts.some(pd => o.text.toLowerCase().includes(pd))
-            );
-            
-            if (priorityOptions.length > 0) {
-              selectedOpt = priorityOptions[Math.floor(Math.random() * priorityOptions.length)];
+            selectedOpt = options.find(o => o.text.trim().toLowerCase() === target.toLowerCase());
+            if (!selectedOpt) {
+              selectedOpt = options.find(o => o.text.toLowerCase().includes(target.toLowerCase()));
             }
           }
-          
+
           const finalOpt = selectedOpt || options[Math.floor(Math.random() * options.length)];
           
           sel.value = finalOpt.value;
@@ -1872,7 +1946,6 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         } else {
           addLog(logs, `İlçe seçilemedi: ${townResult.label}`, "WARN");
         }
-        await sleep(2000); // Mahalle listesinin yüklenmesini bekle
       } catch (err) {
         addLog(logs, `İlçe seçimi hatası: ${err instanceof Error ? err.message : "?"}`, "DEBUG");
       }
@@ -1910,7 +1983,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         } else {
           addLog(logs, `Mahalle seçilemedi: ${quarterResult.label}`, "WARN");
         }
-        await sleep(1000);
+        await sleep(300);
       } catch (err) {
         addLog(logs, `Mahalle seçimi hatası: ${err instanceof Error ? err.message : "?"}`, "DEBUG");
       }
@@ -1955,8 +2028,8 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
 
       // ──── FORM DEVAM BUTONU ────
       stepLog(logs, "FORM DEVAM BUTONU");
-      addLog(logs, "Devam butonundan önce 3 saniye bekleniyor...", "INFO");
-      await sleep(3_000);
+      addLog(logs, "Devam butonu tıklanıyor...", "INFO");
+      await sleep(500);
 
       // Angular form submit: .add-classified-submit butonunu tıkla
       try {
@@ -1979,7 +2052,6 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       if (page.url().includes("kategori-tahmini")) {
         stepLog(logs, "KATEGORİ TAHMİNİ");
         addLog(logs, "Kategori tahmin sayfası — manuel seçim yapılıyor...", "INFO");
-        await sleep(2_000);
 
         try {
           await page.waitForSelector('a.post-get-btn-sicily, a.btn-link', { timeout: 10_000 }).catch(() => null);
@@ -2013,24 +2085,93 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
             "Apple",
             "iPhone 17 Pro Max",
           ];
-          for (const cat of categories) {
+          for (let ci = 0; ci < categories.length; ci++) {
+            const cat = categories[ci];
             await clickCategoryItem(page, cat);
             addLog(logs, `Kategori seçildi: ${cat}`, "OK");
-            await sleep(2_000);
+
+            // Sonraki kategori varsa, onun DOM'da görünmesini bekle
+            if (ci < categories.length - 1) {
+              const nextCat = categories[ci + 1];
+              try {
+                await page.waitForFunction(
+                  (next: string) => {
+                    const normalize = (v: string) => v.replace(/\s+/g, " ").trim().toLowerCase();
+                    const all = Array.from(document.querySelectorAll<HTMLElement>("li, a, span"));
+                    return all.some((el) => normalize(el.textContent ?? "") === normalize(next));
+                  },
+                  { timeout: 10000 },
+                  nextCat,
+                );
+              } catch {
+                addLog(logs, `Alt kategori "${nextCat}" yüklenemedi, 2s bekleniyor...`, "WARN");
+                await sleep(2000);
+              }
+            }
           }
           addLog(logs, "Kategori seçimi tamamlandı, 'Devam Et' tıklanıyor...", "INFO");
-          await sleep(1_000);
+          await sleep(300);
 
-          const devamClicked = await page.evaluate(() => {
-            const sicily = document.getElementById('sicilyManuel');
-            if (sicily) { (sicily as HTMLElement).click(); return true; }
-            const links = Array.from(document.querySelectorAll<HTMLElement>('a, button'));
-            const byText = links.find(el =>
-              el.textContent?.replace(/\s+/g, ' ').trim() === 'Devam Et'
-            );
-            if (byText) { byText.click(); return true; }
-            return false;
+          // ng-hide'ı kaldır, display: block !important ile override et
+          await page.evaluate(() => {
+            const el = document.getElementById('sicilyManuel');
+            if (el) {
+              el.classList.remove('ng-hide', 'ng-hide-animate');
+              (el as HTMLElement).style.setProperty('display', 'block', 'important');
+            }
           });
+          await sleep(500);
+
+          let devamClicked = false;
+          // 1. Puppeteer native click (gerçek fare olayı gönderir)
+          try {
+            await page.waitForSelector('#sicilyManuel', { timeout: 5000 });
+            await page.click('#sicilyManuel');
+            devamClicked = true;
+          } catch {
+            addLog(logs, "Native click başarısız, Angular scope deneniyor...", "WARN");
+          }
+
+          // 2. Native click başarısızsa Angular scope ile doğrudan tetikle
+          if (!devamClicked) {
+            devamClicked = await page.evaluate(() => {
+              const el = document.getElementById('sicilyManuel');
+              if (el && (window as any).angular) {
+                try {
+                  const scope = (window as any).angular.element(el).scope();
+                  if (scope && typeof scope.categorySetSelect === 'function') {
+                    scope.$apply(() => { scope.categorySetSelect('DEFAULT'); });
+                    return true;
+                  }
+                } catch {}
+              }
+              return false;
+            });
+          }
+
+          // 3. Son çare: text bazlı arama
+          if (!devamClicked) {
+            devamClicked = await page.evaluate(() => {
+              const normalize = (v: string) => v.replace(/\s+/g, ' ').trim();
+              const links = Array.from(document.querySelectorAll<HTMLElement>('a, button'));
+              // Önce görünür olan
+              const visible = links.find(el =>
+                normalize(el.textContent ?? '') === 'Devam Et' &&
+                !el.classList.contains('ng-hide') &&
+                (el as HTMLElement).offsetParent !== null
+              );
+              if (visible) { visible.click(); return true; }
+              // Gizli dahil
+              const anyEl = links.find(el => normalize(el.textContent ?? '') === 'Devam Et');
+              if (anyEl) {
+                anyEl.classList.remove('ng-hide', 'ng-hide-animate');
+                (anyEl as HTMLElement).style.setProperty('display', 'block', 'important');
+                anyEl.click();
+                return true;
+              }
+              return false;
+            });
+          }
 
           if (devamClicked) {
             addLog(logs, "'Devam Et' tıklandı.", "OK");
@@ -2082,14 +2223,49 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
     if (page.url().includes("teslimat-tercihleri")) {
       stepLog(logs, "TESLİMAT TERCİHLERİ");
       try {
-        await sleep(2000);
+        // Loader'ın bitmesini bekle
+        await page.waitForFunction(() => {
+          const loader = document.querySelector('.loading, .spinner, .loader, [class*="loading"], [class*="spinner"]');
+          const overlay = document.querySelector('.overlay, .modal-backdrop');
+          return !loader && !overlay;
+        }, { timeout: 10000 }).catch(() => null);
+
+        await sleep(500);
         addLog(logs, "Teslimat tercihleri 'Devam Et' tıklanıyor...", "INFO");
+
+        // Butonun aktif olmasını bekle
+        await page.waitForFunction(() => {
+          const btn = document.querySelector('button.add-classified-submit') as HTMLButtonElement;
+          return btn && !btn.disabled;
+        }, { timeout: 10000 }).catch(() => null);
+
         await page.evaluate(() => {
           const btn = document.querySelector('button.add-classified-submit') as HTMLButtonElement;
           if (btn) btn.click();
         });
-        await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
-        addLog(logs, "Teslimat tercihleri adımı tamamlandı.", "OK");
+
+        // Navigation'ı bekle — timeout olursa retry
+        let navigated = false;
+        try {
+          await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 });
+          navigated = true;
+        } catch {
+          addLog(logs, "Teslimat tercihleri navigation timeout, tekrar tıklanıyor...", "WARN");
+          await page.evaluate(() => {
+            const btn = document.querySelector('button.add-classified-submit') as HTMLButtonElement;
+            if (btn && !btn.disabled) btn.click();
+          });
+          try {
+            await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 });
+            navigated = true;
+          } catch {
+            addLog(logs, "Teslimat tercihleri 2. navigation timeout!", "ERROR");
+          }
+        }
+
+        if (navigated) {
+          addLog(logs, `Teslimat tercihleri adımı tamamlandı. URL: ${page.url()}`, "OK");
+        }
       } catch (err) {
         addLog(logs, `Teslimat tercihleri adımında hata: ${err instanceof Error ? err.message : "?"}`, "WARN");
       }
@@ -2105,7 +2281,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         await fillInputValue(page, 'input[name="addClassifiedPrice"]', String(listing.price));
         addLog(logs, `Fiyat → ${listing.price} TL`, "OK");
         
-        await sleep(1000);
+        await sleep(300);
         addLog(logs, "Fiyat sayfasında 'Devam Et' tıklanıyor...", "INFO");
         await page.evaluate(() => {
           const btn = document.querySelector('button.add-classified-submit') as HTMLButtonElement;
@@ -2119,66 +2295,90 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // ADIM 3: ÖNİZLEME
+    // ADIM 3-5: ÖNİZLEME → DOPİNG → TEBRİKLER (döngü ile)
     // ═══════════════════════════════════════════════════════════════════
-    if (page.url().includes("adim-3")) {
-      stepLog(logs, "ÖNİZLEME");
-      try {
-        await page.waitForSelector('button.btn', { timeout: 5000 }).catch(() => null);
-        await sleep(1000);
-        addLog(logs, "Adım-3 onay sayfası 'Devam Et' tıklanıyor...", "INFO");
-        
-        const clicked = await page.evaluate(() => {
-          const btns = Array.from(document.querySelectorAll('button.btn'));
-          const submitBtn = btns.find(b => b.textContent?.includes("Devam Et") || b.getAttribute('ng-click') === "submitClassified()") as HTMLButtonElement;
-          if (submitBtn) {
-            submitBtn.click();
-            return true;
+    let postFiyatLoop = 0;
+    const MAX_POST_FIYAT_LOOP = 15;
+    while (postFiyatLoop++ < MAX_POST_FIYAT_LOOP && !page.url().includes("tebrikler")) {
+      const loopUrl = page.url();
+
+      if (loopUrl.includes("adim-3")) {
+        stepLog(logs, "ÖNİZLEME");
+        try {
+          await page.waitForSelector('button.btn', { timeout: 5000 }).catch(() => null);
+          await sleep(1000);
+          addLog(logs, "Adım-3 onay sayfası 'Devam Et' tıklanıyor...", "INFO");
+
+          const clicked = await page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll('button.btn'));
+            const submitBtn = btns.find(b => b.textContent?.includes("Devam Et") || b.getAttribute('ng-click') === "submitClassified()") as HTMLButtonElement;
+            if (submitBtn) {
+              submitBtn.click();
+              return true;
+            }
+            return false;
+          });
+
+          if (clicked) {
+            await sleep(2000);
+            try {
+              await page.waitForFunction(
+                () => !window.location.href.includes("adim-3"),
+                { timeout: 25000 },
+              );
+            } catch {
+              addLog(logs, "Adım-3 → sonraki adım geçişi timeout, URL kontrol ediliyor...", "WARN");
+            }
+            addLog(logs, `Adım-3 sonrası URL: ${page.url()}`, "INFO");
+          } else {
+            addLog(logs, "Adım-3 onay butonu bulunamadı!", "WARN");
           }
-          return false;
-        });
-
-        if (clicked) {
-          await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
-          addLog(logs, "Adım-3 onay adımı tamamlandı.", "OK");
-        } else {
-          addLog(logs, "Adım-3 onay butonu bulunamadı!", "WARN");
+        } catch (err) {
+          addLog(logs, `Adım-3 onay adımında hata: ${err instanceof Error ? err.message : "?"}`, "WARN");
         }
-      } catch (err) {
-        addLog(logs, `Adım-3 onay adımında hata: ${err instanceof Error ? err.message : "?"}`, "WARN");
       }
-    }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // ADIM 4: DOPİNG
-    // ═══════════════════════════════════════════════════════════════════
-    if (page.url().includes("/ilan-ver/doping/")) {
-      stepLog(logs, "DOPİNG");
-      try {
-        addLog(logs, "Doping sayfası 'Devam Et' tıklanıyor...", "INFO");
-        await page.evaluate(() => {
-          const btn = document.querySelector('button.btn[ng-click="submit()"]') as HTMLButtonElement;
-          if (btn) btn.click();
-        });
-        await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
-        addLog(logs, "Doping adımı tamamlandı.", "OK");
-      } catch (err) {
-        addLog(logs, `Doping sayfasında hata: ${err instanceof Error ? err.message : "?"}`, "WARN");
+      if (page.url().includes("/ilan-ver/doping/")) {
+        stepLog(logs, "DOPİNG");
+        try {
+          addLog(logs, "Doping sayfası 'Devam Et' tıklanıyor...", "INFO");
+          await page.evaluate(() => {
+            const btn = document.querySelector('button.btn[ng-click="submit()"]') as HTMLButtonElement;
+            if (btn) btn.click();
+          });
+          await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
+          addLog(logs, `Doping sonrası URL: ${page.url()}`, "INFO");
+        } catch (err) {
+          addLog(logs, `Doping sayfasında hata: ${err instanceof Error ? err.message : "?"}`, "WARN");
+        }
       }
+
+      if (page.url().includes("tebrikler")) {
+        stepLog(logs, "TEBRİKLER");
+        addLog(logs, "İlan başarıyla yayınlandı! Tebrikler sayfası.", "OK");
+      }
+
+      await sleep(1000);
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // ADIM 5: TEBRİKLER
-    // ═══════════════════════════════════════════════════════════════════
-    if (page.url().includes("tebrikler")) {
-      stepLog(logs, "TEBRİKLER");
-      addLog(logs, "İlan başarıyla yayınlandı! Tebrikler sayfası.", "OK");
-    }
-
-    // ── Sonuç ──
+    // ── Sonuç Doğrulama ──
+    const finalUrl = page.url();
     const totalElapsed = ((Date.now() - _publishStartTime) / 1000).toFixed(1);
+
+    const isSuccess = finalUrl.includes("tebrikler") || finalUrl.includes("doping");
+    const isStuck = finalUrl.includes("teslimat-tercihleri") || finalUrl.includes("urun-fiyati") || finalUrl.includes("ilan-bilgileri") || finalUrl.includes("fotograf-video");
+
+    if (isStuck) {
+      addLog(logs, `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "STEP");
+      addLog(logs, `  ❌ İLAN YAYINLANAMADI — Sayfa takılı kaldı: ${finalUrl}`, "ERROR");
+      addLog(logs, `  Süre: ${totalElapsed}s`, "STEP");
+      addLog(logs, `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "STEP");
+      await persistDebugScreenshot(page, logs);
+      return { ok: false, mode, logs, error: `Sayfa takılı kaldı: ${finalUrl.split("?")[0]}` };
+    }
+
     addLog(logs, `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "STEP");
-    addLog(logs, `  ✅ PUBLISH TAMAMLANDI — ${totalElapsed}s`, "STEP");
+    addLog(logs, `  ✅ PUBLISH TAMAMLANDI — ${totalElapsed}s (URL: ${finalUrl.split("?")[0]})`, "STEP");
     addLog(logs, `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "STEP");
 
     return { ok: true, mode, logs };
@@ -2209,6 +2409,13 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
 
     return { ok: false, mode, logs };
   } finally {
+    try {
+      if (page && !page.isClosed()) {
+        await page.close();
+        addLog(logs, "Sayfa (tab) kapatıldı.", "INFO");
+      }
+    } catch {}
+
     if (shouldCloseBrowser && !shouldKeepOpenForDebug && mode !== "draft") {
       await browser.close();
       addLog(logs, "Tarayıcı kapatıldı.", "INFO");

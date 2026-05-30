@@ -20,7 +20,8 @@ export async function uploadToImgbb(imagePath: string) {
   });
 
   if (!response.ok) {
-    throw new Error(`imgbb yukleme hatasi: ${response.status}`);
+    const errorBody = await response.text().catch(() => "");
+    throw new Error(`imgbb yukleme hatasi: ${response.status} — ${errorBody.slice(0, 200)}`);
   }
 
   const json = (await response.json()) as {

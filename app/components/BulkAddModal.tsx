@@ -6,7 +6,6 @@ import {
   X,
   Layers,
   ChevronDown,
-  MapPin,
   Type,
   Smartphone,
   PlusCircle,
@@ -33,7 +32,6 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
   const [selectedBrand, setSelectedBrand] = useState(BRANDS[0].name);
   const [selectedModel, setSelectedModel] = useState(BRANDS[0].models[0]);
   const [selectedSlogan, setSelectedSlogan] = useState(SLOGANS[0]);
-  const [selectedTown, setSelectedTown] = useState(TOWNS[0]);
   const [quickAdding, setQuickAdding] = useState(false);
   const [quickProgress, setQuickProgress] = useState({ current: 0, total: 0 });
 
@@ -49,7 +47,6 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
     const newDrafts: { draft: ListingDraft; preview: string | null }[] = [];
 
     for (let i = 0; i < 10; i++) {
-      // Use sequential slogans and towns
       const currentSlogan = SLOGANS[i % SLOGANS.length];
       const currentTown = TOWNS[i % TOWNS.length];
 
@@ -239,24 +236,6 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
 
           <div className="space-y-3">
             <label className="text-[11px] font-bold uppercase tracking-widest text-zinc-500 flex items-center gap-2">
-              <MapPin className="w-3.5 h-3.5" /> İlçe
-            </label>
-            <div className="relative">
-              <select
-                value={selectedTown}
-                onChange={(e) => setSelectedTown(e.target.value)}
-                className={selectBase}
-              >
-                {TOWNS.map(t => (
-                  <option key={t} value={t} className="bg-zinc-900">{t}</option>
-                ))}
-              </select>
-              <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 pointer-events-none" />
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            <label className="text-[11px] font-bold uppercase tracking-widest text-zinc-500 flex items-center gap-2">
               <Smartphone className="w-3.5 h-3.5" /> Marka
             </label>
             <div className="relative">
@@ -302,7 +281,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
               Oluşturulacak Başlık: <span className="text-[#11F08E] font-bold">{selectedSlogan} {selectedModel} 256 GB</span>
             </p>
             <p className="text-[10px] text-zinc-500 leading-relaxed italic">
-              Bu işlem ile kuyruğa 10 adet taslak eklenecektir. Her ilanın fiyatı 52.000 TL - 54.000 TL arasında rastgele belirlenecektir. Görselleri daha sonra tablo üzerinden tek tek ekleyebilirsiniz.
+              Bu işlem ile kuyruğa 10 adet taslak eklenecektir. Her ilanın fiyatı 50.000 TL - 54.000 TL arasında rastgele belirlenecektir. İlçeler alfabetik sırayla otomatik atanır (Adalar, Arnavutköy, Ataşehir...).
             </p>
           </div>
         </div>

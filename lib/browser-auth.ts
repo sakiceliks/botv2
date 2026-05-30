@@ -13,6 +13,7 @@ export type BrowserAuthResult = {
   status: BrowserAuthStatus;
   browserRunning: boolean;
   currentUrl?: string;
+  storeName?: string;
   message: string;
   logs: string[];
 };
@@ -114,16 +115,20 @@ export async function detectSahibindenAuthStatus(): Promise<BrowserAuthResult> {
     const detection = await page.evaluate(() => {
       const normalize = (v?: string) => v?.toLocaleLowerCase("tr-TR").trim() || "";
       const text = normalize(document.body?.innerText?.slice(0, 3000));
-      
+
       const hasLogoutLink = !!document.querySelector('a[href*="/cikis"], a[href*="/logout"]');
       const hasAccountLink = !!document.querySelector('a[href*="/hesabim"], a[href*="/bana-ozel"], .user-menu, #user-name');
       const hasMemberProfile = !!document.querySelector('.member-profile, .user-login-container');
-      
+
+      const storeNameEl = document.querySelector('#user-name, .user-name, .member-name, .username, [class*="user-name"], [class*="username"]');
+      const storeName = storeNameEl?.textContent?.trim() || '';
+
       return {
         text,
         hasLogoutLink,
         hasAccountLink,
         hasMemberProfile,
+        storeName,
       };
     });
 
@@ -131,16 +136,17 @@ export async function detectSahibindenAuthStatus(): Promise<BrowserAuthResult> {
     addLog(logs, `Sayfa basligi: ${title || "(bos)"}`);
 
     const normalizedText = detection.text;
-    const looksLoggedOut =
-      currentUrl.includes("/") ||
-      normalizedText.includes("giriş yap") ||
-      normalizedText.includes("uye girisi") ||
-      (normalizedText.includes("e-posta") && normalizedText.includes("şifre"));
+    let parsedPath = "/";
+    try { parsedPath = new URL(currentUrl).pathname; } catch {}
+
+    const isLoginPage =
+      parsedPath === "/" ||
+      parsedPath.includes("/giris") ||
+      parsedPath.includes("/login");
 
     const looksLoggedIn =
       (currentUrl.includes("banaozel.sahibinden.com") ||
         currentUrl.includes("sahibinden.com")) &&
-      !currentUrl.includes("/") &&
       (detection.hasLogoutLink ||
         detection.hasAccountLink ||
         detection.hasMemberProfile ||
@@ -149,13 +155,23 @@ export async function detectSahibindenAuthStatus(): Promise<BrowserAuthResult> {
         normalizedText.includes("hesabım") ||
         normalizedText.includes("ilanlarım"));
 
+    const looksLoggedOut =
+      isLoginPage ||
+      normalizedText.includes("giriş yap") ||
+      normalizedText.includes("uye girisi") ||
+      (normalizedText.includes("e-posta") && normalizedText.includes("şifre"));
+
     if (looksLoggedIn) {
       addLog(logs, "Sahibinden oturumu aktif gorunuyor (indicator bulundu).");
+      if (detection.storeName) {
+        addLog(logs, `Mağaza adı: ${detection.storeName}`);
+      }
       return {
         ok: true,
         status: "logged-in",
         browserRunning: true,
         currentUrl,
+        storeName: detection.storeName || undefined,
         message: "Sahibinden oturumu acik gorunuyor.",
         logs,
       };
