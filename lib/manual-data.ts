@@ -94,8 +94,16 @@ export const TOWNS = [
 export const COLORS = [
   "Lacivert",
   "Gümüş",
-  "Turuncu"
+  "Turuncu",
 ];
+
+export const MODEL_COLORS: Record<string, string[]> = {
+  "16 Pro Max": ["Bej", "Beyaz", "Gri", "Siyah"],
+};
+
+export function getColorsForModel(model?: string): string[] {
+  return (model ? MODEL_COLORS[model] : undefined) ?? COLORS;
+}
 
 export const STORAGE_CAPACITIES = [
   "128 GB",

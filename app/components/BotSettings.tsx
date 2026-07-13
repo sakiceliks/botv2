@@ -31,6 +31,7 @@ import {
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import type { BotSettings } from "@/lib/settings";
+import { BRANDS } from "@/lib/manual-data";
 
 // ── Varsayılan değerler (client-side için) ──────────────────────────────────
 const DEFAULT: BotSettings = {
@@ -48,6 +49,7 @@ const DEFAULT: BotSettings = {
   defaultTown: "Maltepe",
   defaultQuarter: "",
   priceAdjustPercent: 0,
+  modelPriceRanges: { "Apple__16 Pro Max": { min: 48000, max: 50000 } },
   descriptionSuffix: "",
   skipDopingModal: true,
   debugScreenshots: true,
@@ -247,6 +249,180 @@ const SPEED_LABELS: Record<number, { label: string; color: string; desc: string 
   1.5: { label: "Yavaş", color: "text-blue-400", desc: "Güvenli" },
   2: { label: "Çok Yavaş", color: "text-purple-400", desc: "Maksimum güvenlik" },
 };
+
+// ── Model Fiyat Aralıkları Editörü ──────────────────────────────────────────
+function ModelPriceRangesEditor({
+  ranges,
+  onChange,
+}: {
+  ranges: Record<string, { min: number; max: number }>;
+  onChange: (r: Record<string, { min: number; max: number }>) => void;
+}) {
+  const [showAdd, setShowAdd] = useState(false);
+  const [addBrand, setAddBrand] = useState(BRANDS[0].name);
+  const [addModel, setAddModel] = useState(BRANDS[0].models[0]);
+  const [addMin, setAddMin] = useState(48000);
+  const [addMax, setAddMax] = useState(50000);
+
+  const inputCls =
+    "bg-[#0d1117] border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[#11F08E]/50 transition-colors w-full";
+  const selectCls =
+    "bg-[#0d1117] border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[#11F08E]/50 transition-colors w-full appearance-none cursor-pointer";
+
+  const entries = Object.entries(ranges);
+
+  const handleDelete = (key: string) => {
+    const next = { ...ranges };
+    delete next[key];
+    onChange(next);
+  };
+
+  const handleMinMax = (key: string, field: "min" | "max", val: number) => {
+    onChange({ ...ranges, [key]: { ...ranges[key], [field]: val } });
+  };
+
+  const handleAdd = () => {
+    const key = `${addBrand}__${addModel}`;
+    onChange({ ...ranges, [key]: { min: addMin, max: addMax } });
+    setShowAdd(false);
+  };
+
+  const availableModels = BRANDS.find((b) => b.name === addBrand)?.models ?? [];
+
+  return (
+    <div>
+      <FieldLabel
+        label="Model Fiyat Aralıkları"
+        hint="Her marka/model için rastgele fiyat üretilecek alt-üst sınır (TL)"
+      />
+
+      <div className="space-y-2 mt-2">
+        {entries.length === 0 && (
+          <p className="text-[11px] text-zinc-600 italic">Henüz kayıtlı aralık yok.</p>
+        )}
+
+        {entries.map(([key, { min, max }]) => {
+          const label = key.replace("__", " ");
+          return (
+            <div key={key} className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+              <span className="text-[11px] text-zinc-300 font-bold flex-1 min-w-[120px] truncate">{label}</span>
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-zinc-600 uppercase tracking-wider">Min</span>
+                <input
+                  type="number"
+                  value={min}
+                  min={0}
+                  step={1000}
+                  onChange={(e) => handleMinMax(key, "min", Number(e.target.value))}
+                  className={cn(inputCls, "w-24 tabular-nums")}
+                />
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-zinc-600 uppercase tracking-wider">Max</span>
+                <input
+                  type="number"
+                  value={max}
+                  min={0}
+                  step={1000}
+                  onChange={(e) => handleMinMax(key, "max", Number(e.target.value))}
+                  className={cn(inputCls, "w-24 tabular-nums")}
+                />
+              </div>
+              <button
+                onClick={() => handleDelete(key)}
+                className="p-1.5 rounded-lg text-zinc-600 hover:text-red-400 hover:bg-red-500/10 transition-colors flex-shrink-0"
+                title="Sil"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Yeni Ekle Formu */}
+      <AnimatePresence>
+        {showAdd && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="overflow-hidden"
+          >
+            <div className="mt-3 p-3 rounded-xl border border-white/10 bg-white/[0.02] space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <p className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Marka</p>
+                  <select
+                    value={addBrand}
+                    onChange={(e) => {
+                      setAddBrand(e.target.value);
+                      const first = BRANDS.find((b) => b.name === e.target.value)?.models[0] ?? "";
+                      setAddModel(first);
+                    }}
+                    className={selectCls}
+                  >
+                    {BRANDS.map((b) => (
+                      <option key={b.name} value={b.name} className="bg-zinc-900">{b.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <p className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Model</p>
+                  <select
+                    value={addModel}
+                    onChange={(e) => setAddModel(e.target.value)}
+                    className={selectCls}
+                  >
+                    {availableModels.map((m) => (
+                      <option key={m} value={m} className="bg-zinc-900">{m}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <p className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Min (TL)</p>
+                  <input type="number" value={addMin} step={1000} min={0}
+                    onChange={(e) => setAddMin(Number(e.target.value))} className={inputCls} />
+                </div>
+                <div>
+                  <p className="text-[10px] text-zinc-500 uppercase tracking-wider mb-1">Max (TL)</p>
+                  <input type="number" value={addMax} step={1000} min={0}
+                    onChange={(e) => setAddMax(Number(e.target.value))} className={inputCls} />
+                </div>
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button onClick={handleAdd}
+                  className="flex-1 py-1.5 rounded-lg bg-[#11F08E] text-[#0d1117] text-xs font-black uppercase tracking-widest">
+                  Ekle
+                </button>
+                <button onClick={() => setShowAdd(false)}
+                  className="flex-1 py-1.5 rounded-lg bg-white/5 border border-white/10 text-zinc-400 text-xs font-bold">
+                  İptal
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {!showAdd && (
+        <button
+          onClick={() => setShowAdd(true)}
+          className="mt-3 flex items-center gap-1.5 text-[11px] font-bold text-[#11F08E] hover:text-[#0fd880] transition-colors"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+          </svg>
+          Yeni Model Ekle
+        </button>
+      )}
+    </div>
+  );
+}
 
 // ── Ana Bileşen ─────────────────────────────────────────────────────────────
 export function BotSettings() {
@@ -614,6 +790,14 @@ export function BotSettings() {
               </span>
             </p>
           )}
+        </div>
+
+        {/* ── Model Fiyat Aralıkları ── */}
+        <div className="sm:col-span-2">
+          <ModelPriceRangesEditor
+            ranges={settings.modelPriceRanges ?? {}}
+            onChange={(ranges) => patch("modelPriceRanges", ranges)}
+          />
         </div>
 
         <div className="sm:col-span-2">

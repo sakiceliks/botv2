@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import {
   FolderOpen,
@@ -26,10 +26,12 @@ import {
   SLOGANS,
   DEFAULT_DESCRIPTION,
   TOWNS,
-  COLORS,
-  STORAGE_CAPACITIES
+  STORAGE_CAPACITIES,
+  getColorsForModel,
 } from "@/lib/manual-data";
 import type { ListingDraft } from "@/lib/types";
+import { getPriceRangeForModel } from "@/lib/price-utils";
+import type { BotSettings } from "@/lib/settings";
 
 interface ManualListingFormProps {
   onDraftCreated: (draft: ListingDraft) => void;
@@ -49,14 +51,30 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
   const [selectedTown, setSelectedTown] = useState("");
   const [selectedColor, setSelectedColor] = useState("");
   const [selectedStorage, setSelectedStorage] = useState("256 GB");
-  const [selectedPrice, setSelectedPrice] = useState(() => {
-    const raw = 52000 + Math.floor(Math.random() * 2001);
-    return String(Math.round(raw / 10) * 10);
-  });
+  const [selectedPrice, setSelectedPrice] = useState("48000");
 
   const [description, setDescription] = useState(DEFAULT_DESCRIPTION);
   const [isUploading, setIsUploading] = useState(false);
   const [isAddingToQueue, setIsAddingToQueue] = useState(false);
+
+  const applyPriceFromSettings = (brand: string, model: string) => {
+    fetch("/api/settings")
+      .then((r) => r.json())
+      .then((data: { ok: boolean; settings: BotSettings }) => {
+        if (data.ok) {
+          const { min, max } = getPriceRangeForModel(data.settings, brand, model);
+          const raw = min + Math.floor(Math.random() * (max - min + 1));
+          setSelectedPrice(String(Math.round(raw / 10) * 10));
+        }
+      })
+      .catch(() => {});
+  };
+
+  // Mount'ta settings'ten fiyat aralığını yükle
+  useEffect(() => {
+    applyPriceFromSettings(selectedBrand, selectedModel);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const validateAndPreview = async (p: string) => {
     setImagePath(p);
@@ -95,9 +113,14 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
   const handleBrandChange = (brandName: string) => {
     setSelectedBrand(brandName);
     const brand = BRANDS.find((b) => b.name === brandName);
-    if (brand && brand.models.length > 0) {
-      setSelectedModel(brand.models[0]);
-    }
+    const firstModel = brand?.models[0] ?? selectedModel;
+    if (brand && brand.models.length > 0) setSelectedModel(firstModel);
+    applyPriceFromSettings(brandName, firstModel);
+  };
+
+  const handleModelChange = (model: string) => {
+    setSelectedModel(model);
+    applyPriceFromSettings(selectedBrand, model);
   };
 
   const buildDraft = (imageUrl: string, imagePath: string): ListingDraft => {
@@ -308,7 +331,7 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
             <div className="relative">
               <select
                 value={selectedModel}
-                onChange={(e) => setSelectedModel(e.target.value)}
+                onChange={(e) => handleModelChange(e.target.value)}
                 className={selectBase}
               >
                 {BRANDS.find(b => b.name === selectedBrand)?.models.map(model => (
@@ -351,7 +374,7 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
                 className={selectBase}
               >
                 <option value="" className="bg-zinc-900">Seçiniz</option>
-                {COLORS.map(color => (
+                {getColorsForModel(selectedModel).map(color => (
                   <option key={color} value={color} className="bg-zinc-900">{color}</option>
                 ))}
               </select>

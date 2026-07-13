@@ -25,6 +25,7 @@ export interface BotSettings {
 
   // ── Fiyat Ayarı ──────────────────────────────────────────────────────────
   priceAdjustPercent: number;   // Fiyata eklenecek yüzde (+5, -3 vb.)
+  modelPriceRanges: Record<string, { min: number; max: number }>;  // "Apple__16 Pro Max" → {min,max}
 
   // ── Açıklama ─────────────────────────────────────────────────────────────
   descriptionSuffix: string;    // Her açıklamanın sonuna eklenecek metin
@@ -63,6 +64,9 @@ export const DEFAULT_SETTINGS: BotSettings = {
   defaultQuarter: "",
 
   priceAdjustPercent: 0,
+  modelPriceRanges: {
+    "Apple__16 Pro Max": { min: 48000, max: 50000 },
+  },
 
   descriptionSuffix: "",
 
@@ -89,6 +93,8 @@ export function readSettings(): BotSettings {
     return { ...DEFAULT_SETTINGS };
   }
 }
+
+export { getPriceRangeForModel } from "./price-utils";
 
 export function writeSettings(settings: Partial<BotSettings>): BotSettings {
   const current = readSettings();

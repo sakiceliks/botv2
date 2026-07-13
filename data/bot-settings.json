@@ -13,10 +13,31 @@
   "defaultTown": "",
   "defaultQuarter": "",
   "priceAdjustPercent": 0,
+  "modelPriceRanges": {
+    "Apple__16 Pro Max": {
+      "min": 48000,
+      "max": 51000
+    },
+    "Apple__17 Pro Max": {
+      "min": 52000,
+      "max": 54000
+    },
+    "Apple__17 Pro": {
+      "min": 48000,
+      "max": 52000
+    },
+    "Apple__16 Pro": {
+      "min": 40000,
+      "max": 44000
+    }
+  },
   "descriptionSuffix": "",
   "skipDopingModal": true,
   "debugScreenshots": true,
   "headless": true,
   "notifyOnSuccess": true,
-  "notifyOnError": true
+  "notifyOnError": true,
+  "telegramBotToken": "",
+  "telegramChatId": "",
+  "telegramNotifyInterval": 10
 }

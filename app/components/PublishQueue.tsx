@@ -27,7 +27,7 @@ import {
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import type { ListingDraft } from "@/lib/types";
-import { COLORS, TOWNS } from "@/lib/manual-data";
+import { getColorsForModel, TOWNS } from "@/lib/manual-data";
 
 export type QueueItemStatus = "pending" | "running" | "done" | "error";
 
@@ -112,6 +112,9 @@ function QueueRow({
   const [draft, setDraft] = useState({ ...item.draft });
   const [imagePathInput, setImagePathInput] = useState("");
   const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+
+  const previewSrc = draft.imageUrl || item.preview || null;
 
   const cfg = STATUS_CONFIG[item.status];
   const StatusIcon = cfg.icon;
@@ -228,13 +231,19 @@ function QueueRow({
 
           {/* Thumbnail */}
           <div className="relative group/thumb flex-shrink-0 lg:flex lg:items-center">
-            <div className={cn(
-              "w-12 h-12 lg:w-10 lg:h-10 rounded-xl overflow-hidden border border-white/5 shadow-2xl transition-all duration-500"
-            )}>
-              {draft.imageUrl || item.preview ? (
+            <div
+              onClick={(e) => {
+                if (previewSrc) { e.stopPropagation(); setShowPreview(true); }
+              }}
+              className={cn(
+                "w-12 h-12 lg:w-10 lg:h-10 rounded-xl overflow-hidden border border-white/5 shadow-2xl transition-all duration-200",
+                previewSrc && "cursor-zoom-in hover:border-[#11F08E]/40 hover:scale-105"
+              )}
+            >
+              {previewSrc ? (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
-                  src={draft.imageUrl || item.preview || ""}
+                  src={previewSrc}
                   alt=""
                   className={cn("w-full h-full object-cover", isUploadingImage && "opacity-40")}
                 />
@@ -260,6 +269,47 @@ function QueueRow({
               )}
             />
           </div>
+
+          {/* Lightbox */}
+          <AnimatePresence>
+            {showPreview && previewSrc && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.15 }}
+                className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-sm"
+                onClick={() => setShowPreview(false)}
+                onKeyDown={(e) => e.key === "Escape" && setShowPreview(false)}
+              >
+                <motion.div
+                  initial={{ scale: 0.88, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.88, opacity: 0 }}
+                  transition={{ duration: 0.18 }}
+                  className="relative max-w-[90vw] max-h-[90vh]"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={previewSrc}
+                    alt={item.draft.name}
+                    className="max-w-[90vw] max-h-[85vh] rounded-2xl shadow-2xl object-contain"
+                  />
+                  <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/80 to-transparent rounded-b-2xl">
+                    <p className="text-xs font-bold text-white truncate">{item.draft.name}</p>
+                    <p className="text-[10px] text-zinc-400 mt-0.5">{item.draft.brand} · {item.draft.model}</p>
+                  </div>
+                  <button
+                    onClick={() => setShowPreview(false)}
+                    className="absolute -top-3 -right-3 w-8 h-8 rounded-full bg-zinc-800 border border-white/10 flex items-center justify-center text-zinc-400 hover:text-white transition-colors shadow-xl"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           {/* Durum (Status with Duration) - Mobile Only */}
           <div className="lg:hidden flex flex-col items-start">
@@ -378,7 +428,7 @@ function QueueRow({
               style={{ padding: "0.375rem 0.75rem" }}
             >
               <option value="" disabled className="bg-zinc-900 text-zinc-500">Seç</option>
-              {COLORS.map((color) => (
+              {getColorsForModel(item.draft.model).map((color) => (
                 <option key={color} value={color} className="bg-zinc-900">
                   {color}
                 </option>
@@ -536,9 +586,17 @@ export function PublishQueue({
   currentIndex,
 }: PublishQueueProps) {
   const [collapsed, setCollapsed] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [lastSelectedIndex, setLastSelectedIndex] = useState<number | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+
+  const toggleGroup = (key: string) =>
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
 
   const handleRowClick = (index: number, e: React.MouseEvent) => {
     const clickedId = items[index].id;
@@ -632,6 +690,22 @@ export function PublishQueue({
           .some((field) => field!.toLowerCase().includes(searchQuery.toLowerCase()))
       )
     : items;
+
+  // Her item'ın orijinal items dizisindeki indexi (isActive için)
+  const itemIndexMap = new Map(items.map((item, i) => [item.id, i]));
+
+  // filteredItems'ı marka+model grubuna göre ayır
+  const groups: { key: string; label: string; items: QueueItem[] }[] = [];
+  const groupMap = new Map<string, QueueItem[]>();
+  for (const item of filteredItems) {
+    const key = `${item.draft.brand}__${item.draft.model}`;
+    const label = `${item.draft.brand} ${item.draft.model}`;
+    if (!groupMap.has(key)) {
+      groupMap.set(key, []);
+      groups.push({ key, label, items: groupMap.get(key)! });
+    }
+    groupMap.get(key)!.push(item);
+  }
 
   if (total === 0) {
     return (
@@ -779,29 +853,94 @@ export function PublishQueue({
             </div>
 
             {/* List Body */}
-            <div className="flex flex-col gap-3 p-4 pb-8 lg:gap-0 lg:p-0 lg:pb-0 lg:divide-y lg:divide-white/[0.02]">
-              <div className="flex flex-col">
-                {filteredItems.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-12 text-center">
-                    <p className="text-sm text-zinc-600 font-bold">Arama sonucu bulunamadı</p>
-                    <p className="text-[10px] text-zinc-700 mt-1">Farklı bir kelime ile tekrar dene</p>
-                  </div>
-                ) : (
-                  filteredItems.map((item, idx) => (
-                    <QueueRow
-                      key={item.id}
-                      item={item}
-                      index={idx}
-                      isActive={currentIndex === idx}
-                      isSelected={selectedIds.includes(item.id)}
-                      isRunning={isRunning}
-                      onRemove={onRemove}
-                      onUpdate={onUpdate}
-                      onSelect={(e) => handleRowClick(idx, e)}
-                    />
-                  ))
-                )}
-              </div>
+            <div className="flex flex-col gap-3 p-4 pb-8 lg:gap-0 lg:p-0 lg:pb-0">
+              {filteredItems.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <p className="text-sm text-zinc-600 font-bold">Arama sonucu bulunamadı</p>
+                  <p className="text-[10px] text-zinc-700 mt-1">Farklı bir kelime ile tekrar dene</p>
+                </div>
+              ) : (
+                groups.map(({ key, label, items: groupItems }) => {
+                  const isGroupCollapsed = collapsedGroups.has(key);
+                  const gDone    = groupItems.filter(i => i.status === "done").length;
+                  const gError   = groupItems.filter(i => i.status === "error").length;
+                  const gRunning = groupItems.filter(i => i.status === "running").length;
+                  const gPending = groupItems.filter(i => i.status === "pending").length;
+
+                  return (
+                    <div key={key} className="flex flex-col">
+                      {/* Grup Başlığı */}
+                      <button
+                        onClick={() => toggleGroup(key)}
+                        className="flex items-center gap-3 px-4 lg:px-6 py-2.5 bg-white/[0.025] hover:bg-white/[0.04] border-y border-white/[0.05] transition-colors text-left w-full"
+                      >
+                        <ChevronDown className={cn(
+                          "w-3.5 h-3.5 text-zinc-500 flex-shrink-0 transition-transform duration-200",
+                          isGroupCollapsed && "-rotate-90"
+                        )} />
+                        <span className="text-[11px] font-black text-zinc-300 uppercase tracking-widest">
+                          {label}
+                        </span>
+                        <span className="text-[10px] text-zinc-600 font-bold">
+                          {groupItems.length} ilan
+                        </span>
+                        <div className="flex items-center gap-2 ml-auto">
+                          {gRunning > 0 && (
+                            <span className="text-[10px] font-bold text-amber-400 flex items-center gap-1">
+                              <Loader2 className="w-3 h-3 animate-spin" />{gRunning}
+                            </span>
+                          )}
+                          {gDone > 0 && (
+                            <span className="text-[10px] font-bold text-[#11F08E]">
+                              ✓ {gDone}
+                            </span>
+                          )}
+                          {gError > 0 && (
+                            <span className="text-[10px] font-bold text-red-400">
+                              ✗ {gError}
+                            </span>
+                          )}
+                          {gPending > 0 && (
+                            <span className="text-[10px] font-bold text-zinc-600">
+                              {gPending} bekliyor
+                            </span>
+                          )}
+                        </div>
+                      </button>
+
+                      {/* Grup Satırları */}
+                      <AnimatePresence initial={false}>
+                        {!isGroupCollapsed && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: "auto", opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2 }}
+                            className="overflow-hidden divide-y divide-white/[0.02]"
+                          >
+                            {groupItems.map((item) => {
+                              const globalIdx = itemIndexMap.get(item.id)!;
+                              return (
+                                <QueueRow
+                                  key={item.id}
+                                  item={item}
+                                  index={globalIdx}
+                                  isActive={currentIndex === globalIdx}
+                                  isSelected={selectedIds.includes(item.id)}
+                                  isRunning={isRunning}
+                                  onRemove={onRemove}
+                                  onUpdate={onUpdate}
+                                  onSelect={(e) => handleRowClick(globalIdx, e)}
+                                />
+                              );
+                            })}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  );
+                })
+              )}
             </div>
 
             {/* Empty State / Hint */}

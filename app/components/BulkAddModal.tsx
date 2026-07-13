@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import {
   X,
@@ -22,6 +22,8 @@ import {
   DEFAULT_DESCRIPTION
 } from "@/lib/manual-data";
 import type { ListingDraft } from "@/lib/types";
+import { getPriceRangeForModel } from "@/lib/price-utils";
+import type { BotSettings } from "@/lib/settings";
 
 interface BulkAddModalProps {
   onAdd: (drafts: { draft: ListingDraft; preview: string | null }[]) => void;
@@ -34,13 +36,49 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
   const [selectedSlogan, setSelectedSlogan] = useState(SLOGANS[0]);
   const [quickAdding, setQuickAdding] = useState(false);
   const [quickProgress, setQuickProgress] = useState({ current: 0, total: 0 });
+  const [priceMin, setPriceMin] = useState(48000);
+  const [priceMax, setPriceMax] = useState(50000);
+
+  // Settings'ten fiyat aralığını yükle
+  useEffect(() => {
+    fetch("/api/settings")
+      .then((r) => r.json())
+      .then((data: { ok: boolean; settings: BotSettings }) => {
+        if (data.ok) {
+          const range = getPriceRangeForModel(data.settings, selectedBrand, selectedModel);
+          setPriceMin(range.min);
+          setPriceMax(range.max);
+        }
+      })
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Marka veya model değişince fiyat aralığını güncelle
+  const updatePriceRange = (brand: string, model: string) => {
+    fetch("/api/settings")
+      .then((r) => r.json())
+      .then((data: { ok: boolean; settings: BotSettings }) => {
+        if (data.ok) {
+          const range = getPriceRangeForModel(data.settings, brand, model);
+          setPriceMin(range.min);
+          setPriceMax(range.max);
+        }
+      })
+      .catch(() => {});
+  };
 
   const handleBrandChange = (brandName: string) => {
     setSelectedBrand(brandName);
     const brand = BRANDS.find((b) => b.name === brandName);
-    if (brand && brand.models.length > 0) {
-      setSelectedModel(brand.models[0]);
-    }
+    const firstModel = brand?.models[0] ?? selectedModel;
+    if (brand && brand.models.length > 0) setSelectedModel(firstModel);
+    updatePriceRange(brandName, firstModel);
+  };
+
+  const handleModelChange = (model: string) => {
+    setSelectedModel(model);
+    updatePriceRange(selectedBrand, model);
   };
 
   const handleBulkAdd = () => {
@@ -50,8 +88,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
       const currentSlogan = SLOGANS[i % SLOGANS.length];
       const currentTown = TOWNS[i % TOWNS.length];
 
-      // Random price between 52,000 and 54,000 for variety
-      const rawPrice = 50000 + Math.floor(Math.random() * 4001);
+      const rawPrice = priceMin + Math.floor(Math.random() * (priceMax - priceMin + 1));
       const price = Math.round(rawPrice / 10) * 10;
       
       const listingName = `${currentSlogan} ${selectedModel} 256 GB`.toUpperCase();
@@ -97,10 +134,22 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
     onClose();
   };
 
+  // Marka adı yerine cihaz adını kullan: Apple → "iphone", Samsung → "samsung"
+  const BRAND_FOLDER_PREFIX: Record<string, string> = {
+    "Apple": "iphone",
+    "Samsung": "samsung",
+  };
+
+  const toModelSlug = (brand: string, model: string) => {
+    const prefix = BRAND_FOLDER_PREFIX[brand] ?? brand.toLowerCase();
+    return `${prefix} ${model}`.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+  };
+
   const handleQuickAdd = async () => {
     setQuickAdding(true);
     try {
-      const res = await fetch("/api/mock-images");
+      const modelSlug = toModelSlug(selectedBrand, selectedModel);
+      const res = await fetch(`/api/mock-images?model=${encodeURIComponent(modelSlug)}`);
       const data = await res.json();
 
       if (!data.ok || data.images.length === 0) {
@@ -133,7 +182,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
           const currentSlogan = SLOGANS[i % SLOGANS.length];
           const currentTown = TOWNS[i % TOWNS.length];
 
-          const rawPrice = 52000 + Math.floor(Math.random() * 2001);
+          const rawPrice = priceMin + Math.floor(Math.random() * (priceMax - priceMin + 1));
           const price = Math.round(rawPrice / 10) * 10;
 
           const listingName = `${currentSlogan} ${selectedModel} 256 GB`.toUpperCase();
@@ -259,7 +308,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
             <div className="relative">
               <select
                 value={selectedModel}
-                onChange={(e) => setSelectedModel(e.target.value)}
+                onChange={(e) => handleModelChange(e.target.value)}
                 className={selectBase}
               >
                 {BRANDS.find(b => b.name === selectedBrand)?.models.map(m => (
@@ -268,6 +317,36 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
               </select>
               <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 pointer-events-none" />
             </div>
+          </div>
+        </div>
+
+        {/* Fiyat Aralığı */}
+        <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-3">
+            <label className="text-[11px] font-bold uppercase tracking-widest text-zinc-500 flex items-center gap-2">
+              <Zap className="w-3.5 h-3.5 text-amber-400" /> Min Fiyat (TL)
+            </label>
+            <input
+              type="number"
+              value={priceMin}
+              min={0}
+              step={1000}
+              onChange={(e) => setPriceMin(Number(e.target.value))}
+              className={selectBase}
+            />
+          </div>
+          <div className="space-y-3">
+            <label className="text-[11px] font-bold uppercase tracking-widest text-zinc-500 flex items-center gap-2">
+              <Zap className="w-3.5 h-3.5 text-amber-400" /> Max Fiyat (TL)
+            </label>
+            <input
+              type="number"
+              value={priceMax}
+              min={0}
+              step={1000}
+              onChange={(e) => setPriceMax(Number(e.target.value))}
+              className={selectBase}
+            />
           </div>
         </div>
 
@@ -281,7 +360,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
               Oluşturulacak Başlık: <span className="text-[#11F08E] font-bold">{selectedSlogan} {selectedModel} 256 GB</span>
             </p>
             <p className="text-[10px] text-zinc-500 leading-relaxed italic">
-              Bu işlem ile kuyruğa 10 adet taslak eklenecektir. Her ilanın fiyatı 50.000 TL - 54.000 TL arasında rastgele belirlenecektir. İlçeler alfabetik sırayla otomatik atanır (Adalar, Arnavutköy, Ataşehir...).
+              Fiyat aralığı: <span className="text-white font-bold">{priceMin.toLocaleString("tr-TR")} — {priceMax.toLocaleString("tr-TR")} TL</span>. İlçeler alfabetik sırayla otomatik atanır.
             </p>
           </div>
         </div>

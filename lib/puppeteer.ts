@@ -695,6 +695,12 @@ async function fillAllVisibleSelects(
         const colorMatch = info.options.find((o) => normalize(o).includes(colorNorm) || colorNorm.includes(normalize(o)));
         if (colorMatch) chosen = colorMatch;
       }
+      // Listedeki depolama alanı varsa bot ayarı yerine onu tercih et
+      if (info.name === "a101170" && listing.storage) {
+        const storageNorm = normalize(String(listing.storage));
+        const storageMatch = info.options.find((o) => normalize(o).includes(storageNorm) || storageNorm.includes(normalize(o)));
+        if (storageMatch) chosen = storageMatch;
+      }
     }
 
     // 2. listing verisinden eşleştir
@@ -2082,8 +2088,8 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
           const categories = [
             "Cep Telefonu & Aksesuar",
             "Cep Telefonu",
-            "Apple",
-            "iPhone 17 Pro Max",
+            listing.brand,
+            listing.model,
           ];
           for (let ci = 0; ci < categories.length; ci++) {
             const cat = categories[ci];
