@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { uploadToImgbb } from "@/lib/imgbb";
 import { saveFormFile } from "@/lib/storage";
 
 export async function POST(request: Request) {
@@ -13,17 +12,9 @@ export async function POST(request: Request) {
 
     const savedImage = await saveFormFile(file);
 
-    let imageUrl = "";
-    try {
-      const result = await uploadToImgbb(savedImage.fullPath);
-      imageUrl = result.imageUrl;
-    } catch (err) {
-      console.warn("[API/UPLOAD] ImgBB yükleme başarısız, yerel dosya kullanılacak:", err instanceof Error ? err.message : err);
-    }
-
     return NextResponse.json({
       ok: true,
-      imageUrl: imageUrl || `/uploads/${savedImage.relativePath.replace(/^.*[/\\]/, "")}`,
+      imageUrl: savedImage.relativePath,
       imagePath: savedImage.relativePath,
     });
   } catch (error) {

@@ -27,11 +27,12 @@ import {
   AlertTriangle,
   CheckCircle2,
   Loader2,
+  ListChecks,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import type { BotSettings } from "@/lib/settings";
-import { BRANDS } from "@/lib/manual-data";
+import { BRANDS, TOWNS } from "@/lib/manual-data";
 
 // ── Varsayılan değerler (client-side için) ──────────────────────────────────
 const DEFAULT: BotSettings = {
@@ -48,6 +49,7 @@ const DEFAULT: BotSettings = {
   defaultExchangeable: "Evet",
   defaultTown: "Maltepe",
   defaultQuarter: "",
+  activeTowns: [...TOWNS],
   priceAdjustPercent: 0,
   modelPriceRanges: { "Apple__16 Pro Max": { min: 48000, max: 50000 } },
   descriptionSuffix: "",

@@ -8,6 +8,7 @@ import {
   ChevronDown,
   Type,
   Smartphone,
+  Palette,
   PlusCircle,
   Zap,
   Loader2,
@@ -19,7 +20,8 @@ import {
   BRANDS,
   SLOGANS,
   TOWNS,
-  DEFAULT_DESCRIPTION
+  DEFAULT_DESCRIPTION,
+  getColorsForModel
 } from "@/lib/manual-data";
 import type { ListingDraft } from "@/lib/types";
 import { getPriceRangeForModel } from "@/lib/price-utils";
@@ -34,8 +36,11 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
   const [selectedBrand, setSelectedBrand] = useState(BRANDS[0].name);
   const [selectedModel, setSelectedModel] = useState(BRANDS[0].models[0]);
   const [selectedSlogan, setSelectedSlogan] = useState(SLOGANS[0]);
+  const [selectedColor, setSelectedColor] = useState("");
   const [quickAdding, setQuickAdding] = useState(false);
   const [quickProgress, setQuickProgress] = useState({ current: 0, total: 0 });
+  const [bulkAdding, setBulkAdding] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
   const [priceMin, setPriceMin] = useState(48000);
   const [priceMax, setPriceMax] = useState(50000);
 
@@ -81,59 +86,6 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
     updatePriceRange(selectedBrand, model);
   };
 
-  const handleBulkAdd = () => {
-    const newDrafts: { draft: ListingDraft; preview: string | null }[] = [];
-
-    for (let i = 0; i < 10; i++) {
-      const currentSlogan = SLOGANS[i % SLOGANS.length];
-      const currentTown = TOWNS[i % TOWNS.length];
-
-      const rawPrice = priceMin + Math.floor(Math.random() * (priceMax - priceMin + 1));
-      const price = Math.round(rawPrice / 10) * 10;
-      
-      const listingName = `${currentSlogan} ${selectedModel} 256 GB`.toUpperCase();
-
-      const draft: ListingDraft = {
-        _id: `bulk_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 5)}`,
-        name: listingName,
-        slug: listingName.toLowerCase().replace(/\s+/g, "-"),
-        brand: selectedBrand,
-        model: selectedModel,
-        series: selectedModel,
-        product: selectedModel,
-        productType: "Akıllı Telefon",
-        vehicleType: selectedBrand,
-        condition: "Sıfır",
-        category: "Cep Telefonu",
-        partCategory: selectedModel,
-        price,
-        description: DEFAULT_DESCRIPTION,
-        storage: "256 GB",
-        town: currentTown,
-        imageUrl: "", 
-        imagePath: "", 
-        inStock: true,
-        createdAt: new Date().toISOString(),
-        categoryPath: ["İkinci El ve Sıfır Alışveriş", "Cep Telefonu", "Modeller", selectedBrand, selectedModel],
-        confidence: 1.0,
-        fieldConfidence: {
-          brand: 1.0,
-          model: 1.0,
-          vehicleType: 1.0,
-          partCategory: 1.0,
-          product: 1.0,
-        },
-        sourceHints: ["Toplu Ekleme"],
-        warnings: [],
-      };
-
-      newDrafts.push({ draft, preview: null });
-    }
-
-    onAdd(newDrafts);
-    onClose();
-  };
-
   // Marka adı yerine cihaz adını kullan: Apple → "iphone", Samsung → "samsung"
   const BRAND_FOLDER_PREFIX: Record<string, string> = {
     "Apple": "iphone",
@@ -145,87 +97,195 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
     return `${prefix} ${model}`.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
   };
 
+  type MockImage = { filename: string; url: string; color?: string };
+
+  const fetchModelMockImages = async (brand: string, model: string): Promise<MockImage[]> => {
+    const modelSlug = toModelSlug(brand, model);
+    const res = await fetch(`/api/mock-images?model=${encodeURIComponent(modelSlug)}`);
+    const data = await res.json();
+    if (!data.ok || data.images.length === 0) return [];
+    return [...data.images].sort(() => Math.random() - 0.5);
+  };
+
+  const uploadMockImage = async (image: MockImage, attempts = 3): Promise<{ imageUrl: string; imagePath: string } | null> => {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        const imgRes = await fetch(image.url);
+        if (!imgRes.ok) throw new Error(`Mock görsel alınamadı: ${imgRes.status}`);
+        const imgBlob = await imgRes.blob();
+        const formData = new FormData();
+        formData.append("image", imgBlob, image.filename);
+
+        const uploadRes = await fetch("/api/upload", { method: "POST", body: formData });
+        const uploadData = await uploadRes.json();
+        if (!uploadData.ok) throw new Error(uploadData.error || "Upload başarısız");
+        return { imageUrl: uploadData.imageUrl, imagePath: uploadData.imagePath };
+      } catch {
+        if (attempt === attempts) return null;
+      }
+    }
+    return null;
+  };
+
+  const handleBulkAdd = async () => {
+    setBulkAdding(true);
+    try {
+      const images = await fetchModelMockImages(selectedBrand, selectedModel);
+      if (images.length === 0) {
+        toast.error("Mock görsel bulunamadı!");
+        setBulkAdding(false);
+        return;
+      }
+
+      const total = 10;
+      setBulkProgress({ current: 0, total });
+      const newDrafts: { draft: ListingDraft; preview: string | null }[] = [];
+      const uploadedCache = new Map<number, { imageUrl: string; imagePath: string }>();
+      let missingImageCount = 0;
+
+      for (let i = 0; i < total; i++) {
+        const imgIndex = i % images.length;
+        let uploaded = uploadedCache.get(imgIndex);
+        if (!uploaded) {
+          const result = await uploadMockImage(images[imgIndex]);
+          if (result) {
+            uploaded = result;
+            uploadedCache.set(imgIndex, result);
+          } else {
+            missingImageCount++;
+          }
+        }
+
+        const currentSlogan = SLOGANS[i % SLOGANS.length];
+        const currentTown = TOWNS[i % TOWNS.length];
+
+        const rawPrice = priceMin + Math.floor(Math.random() * (priceMax - priceMin + 1));
+        const price = Math.round(rawPrice / 10) * 10;
+
+        const listingName = `${currentSlogan} ${selectedModel} 256 GB`.toUpperCase();
+
+        const draft: ListingDraft = {
+          _id: `bulk_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 5)}`,
+          name: listingName,
+          slug: listingName.toLowerCase().replace(/\s+/g, "-"),
+          brand: selectedBrand,
+          model: selectedModel,
+          series: selectedModel,
+          product: selectedModel,
+          productType: "Akıllı Telefon",
+          vehicleType: selectedBrand,
+          condition: "Sıfır",
+          category: "Cep Telefonu",
+          partCategory: selectedModel,
+          price,
+          description: DEFAULT_DESCRIPTION,
+          color: images[imgIndex]?.color ?? (selectedColor || undefined),
+          storage: "256 GB",
+          town: currentTown,
+          imageUrl: uploaded?.imageUrl ?? "",
+          imagePath: uploaded?.imagePath ?? "",
+          inStock: true,
+          createdAt: new Date().toISOString(),
+          categoryPath: ["İkinci El ve Sıfır Alışveriş", "Cep Telefonu", "Modeller", selectedBrand, selectedModel],
+          confidence: 1.0,
+          fieldConfidence: {
+            brand: 1.0,
+            model: 1.0,
+            vehicleType: 1.0,
+            partCategory: 1.0,
+            product: 1.0,
+          },
+          sourceHints: ["Toplu Ekleme"],
+          warnings: [],
+        };
+
+        newDrafts.push({ draft, preview: uploaded?.imageUrl ?? null });
+        setBulkProgress({ current: i + 1, total });
+      }
+
+      onAdd(newDrafts);
+      onClose();
+      toast.success(
+        missingImageCount > 0
+          ? `${newDrafts.length} adet ilan kuyruğa eklendi! (${missingImageCount} tanesine görsel eklenemedi)`
+          : `${newDrafts.length} adet ilan kuyruğa eklendi!`
+      );
+    } catch {
+      toast.error("İlanlar eklenirken hata oluştu!");
+    } finally {
+      setBulkAdding(false);
+    }
+  };
+
   const handleQuickAdd = async () => {
     setQuickAdding(true);
     try {
-      const modelSlug = toModelSlug(selectedBrand, selectedModel);
-      const res = await fetch(`/api/mock-images?model=${encodeURIComponent(modelSlug)}`);
-      const data = await res.json();
+      const shuffled = await fetchModelMockImages(selectedBrand, selectedModel);
 
-      if (!data.ok || data.images.length === 0) {
+      if (shuffled.length === 0) {
         toast.error("Mock görsel bulunamadı!");
         setQuickAdding(false);
         return;
       }
 
-      const total = data.images.length;
+      const total = shuffled.length;
       setQuickProgress({ current: 0, total });
       const newDrafts: { draft: ListingDraft; preview: string | null }[] = [];
       let successCount = 0;
 
-      const shuffled = [...data.images].sort(() => Math.random() - 0.5);
-
       for (let i = 0; i < total; i++) {
-        const image = shuffled[i];
+        const uploaded = await uploadMockImage(shuffled[i]);
 
-        try {
-          const imgRes = await fetch(image.url);
-          const imgBlob = await imgRes.blob();
-          const formData = new FormData();
-          formData.append("image", imgBlob, image.filename);
-
-          const uploadRes = await fetch("/api/upload", { method: "POST", body: formData });
-          const uploadData = await uploadRes.json();
-
-          if (!uploadData.ok) continue;
-
-          const currentSlogan = SLOGANS[i % SLOGANS.length];
-          const currentTown = TOWNS[i % TOWNS.length];
-
-          const rawPrice = priceMin + Math.floor(Math.random() * (priceMax - priceMin + 1));
-          const price = Math.round(rawPrice / 10) * 10;
-
-          const listingName = `${currentSlogan} ${selectedModel} 256 GB`.toUpperCase();
-
-          const draft: ListingDraft = {
-            _id: `quick_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 5)}`,
-            name: listingName,
-            slug: listingName.toLowerCase().replace(/\s+/g, "-"),
-            brand: selectedBrand,
-            model: selectedModel,
-            series: selectedModel,
-            product: selectedModel,
-            productType: "Akıllı Telefon",
-            vehicleType: selectedBrand,
-            condition: "Sıfır",
-            category: "Cep Telefonu",
-            partCategory: selectedModel,
-            price,
-            description: DEFAULT_DESCRIPTION,
-            storage: "256 GB",
-            town: currentTown,
-            imageUrl: uploadData.imageUrl,
-            imagePath: uploadData.imagePath,
-            inStock: true,
-            createdAt: new Date().toISOString(),
-            categoryPath: ["İkinci El ve Sıfır Alışveriş", "Cep Telefonu", "Modeller", selectedBrand, selectedModel],
-            confidence: 1.0,
-            fieldConfidence: {
-              brand: 1.0,
-              model: 1.0,
-              vehicleType: 1.0,
-              partCategory: 1.0,
-              product: 1.0,
-            },
-            sourceHints: ["Hızlı Ekleme"],
-            warnings: [],
-          };
-
-          newDrafts.push({ draft, preview: uploadData.imageUrl });
-          successCount++;
-        } catch {
-          // skip failed image
+        if (!uploaded) {
+          setQuickProgress({ current: i + 1, total });
+          continue;
         }
+
+        const currentSlogan = SLOGANS[i % SLOGANS.length];
+        const currentTown = TOWNS[i % TOWNS.length];
+
+        const rawPrice = priceMin + Math.floor(Math.random() * (priceMax - priceMin + 1));
+        const price = Math.round(rawPrice / 10) * 10;
+
+        const listingName = `${currentSlogan} ${selectedModel} 256 GB`.toUpperCase();
+
+        const draft: ListingDraft = {
+          _id: `quick_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 5)}`,
+          name: listingName,
+          slug: listingName.toLowerCase().replace(/\s+/g, "-"),
+          brand: selectedBrand,
+          model: selectedModel,
+          series: selectedModel,
+          product: selectedModel,
+          productType: "Akıllı Telefon",
+          vehicleType: selectedBrand,
+          condition: "Sıfır",
+          category: "Cep Telefonu",
+          partCategory: selectedModel,
+          price,
+          description: DEFAULT_DESCRIPTION,
+          color: shuffled[i]?.color ?? (selectedColor || undefined),
+          storage: "256 GB",
+          town: currentTown,
+          imageUrl: uploaded.imageUrl,
+          imagePath: uploaded.imagePath,
+          inStock: true,
+          createdAt: new Date().toISOString(),
+          categoryPath: ["İkinci El ve Sıfır Alışveriş", "Cep Telefonu", "Modeller", selectedBrand, selectedModel],
+          confidence: 1.0,
+          fieldConfidence: {
+            brand: 1.0,
+            model: 1.0,
+            vehicleType: 1.0,
+            partCategory: 1.0,
+            product: 1.0,
+          },
+          sourceHints: ["Hızlı Ekleme"],
+          warnings: [],
+        };
+
+        newDrafts.push({ draft, preview: uploaded.imageUrl });
+        successCount++;
         setQuickProgress({ current: i + 1, total });
       }
 
@@ -237,7 +297,12 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
 
       onAdd(newDrafts);
       onClose();
-      toast.success(`${successCount} adet hızlı ilan kuyruğa eklendi!`);
+      const failedCount = total - successCount;
+      toast.success(
+        failedCount > 0
+          ? `${successCount} adet hızlı ilan kuyruğa eklendi! (${failedCount} görsel yüklenemedi)`
+          : `${successCount} adet hızlı ilan kuyruğa eklendi!`
+      );
     } catch (err) {
       toast.error("Hızlı ilan eklenirken hata oluştu!");
       setQuickAdding(false);
@@ -318,6 +383,25 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
               <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 pointer-events-none" />
             </div>
           </div>
+
+          <div className="space-y-3">
+            <label className="text-[11px] font-bold uppercase tracking-widest text-zinc-500 flex items-center gap-2">
+              <Palette className="w-3.5 h-3.5" /> Renk
+            </label>
+            <div className="relative">
+              <select
+                value={selectedColor}
+                onChange={(e) => setSelectedColor(e.target.value)}
+                className={selectBase}
+              >
+                <option value="" className="bg-zinc-900">Seçiniz</option>
+                {getColorsForModel(selectedModel).map(color => (
+                  <option key={color} value={color} className="bg-zinc-900">{color}</option>
+                ))}
+              </select>
+              <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 pointer-events-none" />
+            </div>
+          </div>
         </div>
 
         {/* Fiyat Aralığı */}
@@ -369,14 +453,21 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
       <div className="p-6 border-t border-white/5 bg-white/[0.01] space-y-3">
         <button
           onClick={handleBulkAdd}
-          className="w-full flex items-center justify-center gap-3 py-4 rounded-xl bg-[#11F08E] text-[#0d1117] hover:bg-[#0fd880] active:scale-[0.98] transition-all font-black text-sm uppercase tracking-widest shadow-[0_10px_30px_rgba(17,240,142,0.2)]"
+          disabled={bulkAdding || quickAdding}
+          className="w-full flex items-center justify-center gap-3 py-4 rounded-xl bg-[#11F08E] text-[#0d1117] hover:bg-[#0fd880] active:scale-[0.98] transition-all font-black text-sm uppercase tracking-widest shadow-[0_10px_30px_rgba(17,240,142,0.2)] disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          <PlusCircle className="w-5 h-5" />
-          Kuyruğa 10 Adet Ekle
+          {bulkAdding ? (
+            <Loader2 className="w-5 h-5 animate-spin" />
+          ) : (
+            <PlusCircle className="w-5 h-5" />
+          )}
+          {bulkAdding
+            ? `${bulkProgress.current} / ${bulkProgress.total} Yükleniyor...`
+            : "Kuyruğa 10 Adet Ekle"}
         </button>
         <button
           onClick={handleQuickAdd}
-          disabled={quickAdding}
+          disabled={quickAdding || bulkAdding}
           className="w-full flex items-center justify-center gap-3 py-3.5 rounded-xl bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:from-violet-500 hover:to-purple-500 active:scale-[0.98] transition-all font-black text-sm uppercase tracking-widest shadow-[0_10px_30px_rgba(139,92,246,0.25)] disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {quickAdding ? (

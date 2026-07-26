@@ -21,6 +21,13 @@ const publishSchema = z.object({
     partCategory: z.string(),
     price: z.number(),
     description: z.string(),
+    color: z.string().optional(),
+    storage: z.string().optional(),
+    origin: z.string().optional(),
+    warranty: z.string().optional(),
+    exchangeable: z.string().optional(),
+    town: z.string().optional(),
+    quarter: z.string().optional(),
     imageUrl: z.string(),
     imagePath: z.string(),
     inStock: z.boolean(),
@@ -49,6 +56,16 @@ export async function POST(request: Request) {
         {
           ok: false,
           error: "Dusuk guvenli alanlar gozden gecirilmeden publish moduna gecilemez."
+        },
+        { status: 400 }
+      );
+    }
+
+    if (!payload.draft.imagePath && !payload.draft.imageUrl) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "İlanda görsel yok — sahibinden fotoğraf olmadan devam ettirmiyor. Kuyruğa eklemeden önce bir görsel ekleyin."
         },
         { status: 400 }
       );

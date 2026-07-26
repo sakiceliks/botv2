@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { TOWNS } from "./manual-data";
 
 export interface BotSettings {
   // ── Hız & Zamanlama ──────────────────────────────────────────────────────
@@ -22,6 +23,7 @@ export interface BotSettings {
   // ── Konum ────────────────────────────────────────────────────────────────
   defaultTown: string;          // Varsayılan ilçe
   defaultQuarter: string;       // Varsayılan mahalle (boşsa rastgele)
+  activeTowns: string[];        // Hızlı/Toplu ilan eklerken kullanılacak ilçeler
 
   // ── Fiyat Ayarı ──────────────────────────────────────────────────────────
   priceAdjustPercent: number;   // Fiyata eklenecek yüzde (+5, -3 vb.)
@@ -62,6 +64,7 @@ export const DEFAULT_SETTINGS: BotSettings = {
 
   defaultTown: "",
   defaultQuarter: "",
+  activeTowns: [...TOWNS],
 
   priceAdjustPercent: 0,
   modelPriceRanges: {

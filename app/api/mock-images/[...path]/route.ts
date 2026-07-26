@@ -8,7 +8,7 @@ export async function GET(
 ) {
   const { path: segments } = await params;
 
-  if (!segments || segments.length === 0 || segments.length > 2) {
+  if (!segments || segments.length === 0 || segments.length > 3) {
     return NextResponse.json({ error: "Invalid path" }, { status: 400 });
   }
 

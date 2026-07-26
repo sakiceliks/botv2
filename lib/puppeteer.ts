@@ -80,7 +80,6 @@ function addLog(logs: string[], message: string, level: LogLevel = "INFO") {
   const prefix = `${LOG_EMOJI[level]} [${time}]${elapsed ? ` (${elapsed})` : ""}`;
   const line = `${prefix} ${message}`;
   logs.push(line);
-  // Also log to server console for real-time debugging
   if (level === "ERROR") {
     console.error(`[NEXTBOT] ${line}`);
   } else if (level === "WARN") {
@@ -96,7 +95,6 @@ function stepLog(logs: string[], stepName: string) {
   return _stepCounter;
 }
 
-// speedMultiplier ayarına göre ölçeklenmiş sleep
 let _speedMultiplier = 1;
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, Math.round(ms * _speedMultiplier)));
@@ -126,12 +124,10 @@ async function withRetry<T>(
 }
 
 async function resolveImagePath(listing: ListingDraft) {
-  // Try to resolve listing.imagePath (can be absolute or relative to project root)
   if (listing.imagePath) {
-    const absolutePath = path.isAbsolute(listing.imagePath) 
-      ? listing.imagePath 
+    const absolutePath = path.isAbsolute(listing.imagePath)
+      ? listing.imagePath
       : path.join(process.cwd(), listing.imagePath.replace(/^\//, ""));
-    
     if (fs.existsSync(absolutePath)) {
       return absolutePath;
     }
@@ -140,7 +136,6 @@ async function resolveImagePath(listing: ListingDraft) {
   const imageUrl = String(listing.imageUrl || "");
   if (!imageUrl) return null;
 
-  // Local upload URL from this app: /uploads/<file>
   const uploadMarker = "/uploads/";
   const idx = imageUrl.indexOf(uploadMarker);
   if (idx >= 0) {
@@ -149,7 +144,6 @@ async function resolveImagePath(listing: ListingDraft) {
     if (fs.existsSync(localPath)) return localPath;
   }
 
-  // Remote image download fallback
   try {
     const response = await fetch(imageUrl);
     if (!response.ok) return null;
@@ -173,7 +167,15 @@ function guessMimeTypeFromPath(filePath: string) {
   return "image/jpeg";
 }
 
-async function uploadViaCDP(page: Page, inputSelector: string, imagePath: string, logs: string[]) {
+// ═══════════════════════════════════════════════════════════════════
+//  ✅ DÜZELTİLMİŞ — TEK TETİKLEME
+// ═══════════════════════════════════════════════════════════════════
+async function uploadViaCDP(
+  page: Page,
+  inputSelector: string,
+  imagePath: string,
+  logs: string[],
+): Promise<boolean> {
   const client = await page.createCDPSession();
   try {
     const { root } = await client.send("DOM.getDocument");
@@ -181,118 +183,89 @@ async function uploadViaCDP(page: Page, inputSelector: string, imagePath: string
       nodeId: root.nodeId,
       selector: inputSelector,
     });
-
     if (!nodeId) {
       addLog(logs, "CDP: Input element bulunamadı.", "WARN");
       return false;
     }
 
+    // ✅ TEK TETİK — Chrome native change olayını üretir.
+    //    Framework'ler (Angular/React) kendi handler'larını çalıştırır.
     await client.send("DOM.setFileInputFiles", {
       files: [imagePath],
       nodeId,
     });
 
-    await page.evaluate((sel) => {
-      const input = document.querySelector(sel) as HTMLInputElement;
-      if (!input) return;
-
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-
-      const win = window as any;
-      if (win.angular && input.files && input.files.length > 0) {
-        try {
-          const el = win.angular.element(input);
-          const scope = el.scope();
-          if (scope) {
-            const fnNames = ["onFileSelect", "onFileSelected", "handleFileSelect", "uploadFile", "addPhoto"];
-            for (const fn of fnNames) {
-              if (typeof scope[fn] === "function") {
-                scope.$apply(() => { scope[fn](input.files); });
-                break;
-              }
-            }
-          }
-        } catch {}
-      }
-    }, inputSelector);
-
-    addLog(logs, "CDP: DOM.setFileInputFiles ile dosya atandı ve Angular tetiklendi.", "OK");
+    addLog(logs, "CDP: Dosya input'a atandı (tek tetik).", "OK");
     return true;
   } catch (err) {
-    addLog(logs, `CDP upload hatası: ${err instanceof Error ? err.message : "?"}`, "WARN");
+    addLog(
+      logs,
+      `CDP upload hatası: ${err instanceof Error ? err.message : "?"}`,
+      "WARN",
+    );
     return false;
   } finally {
     await client.detach().catch(() => {});
   }
 }
 
-async function injectImageViaBase64(page: Page, inputSelector: string, imagePath: string) {
+// ═══════════════════════════════════════════════════════════════════
+//  ✅ DÜZELTİLMİŞ — TEK TETİKLEME
+// ═══════════════════════════════════════════════════════════════════
+async function injectImageViaBase64(
+  page: Page,
+  inputSelector: string,
+  imagePath: string,
+): Promise<{ ok: boolean; reason?: string }> {
   const fileName = path.basename(imagePath);
   const mimeType = guessMimeTypeFromPath(imagePath);
   const base64Data = fs.readFileSync(imagePath).toString("base64");
 
-  const result = await page.evaluate(async ({ selector, b64, fileName: innerName, mimeType: innerMime }) => {
-    const input = document.querySelector(selector) as HTMLInputElement;
-    if (!input) {
-      return { ok: false, reason: "input-not-found" };
-    }
-
-    try {
-      const binary = atob(b64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i += 1) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-      const file = new File([bytes], innerName, { type: innerMime });
-      const dt = new DataTransfer();
-      dt.items.add(file);
-
-      input.files = dt.files;
-
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-
-      const container = input.closest(".upload-image-container, .photo-upload-wrapper, [class*='upload']");
-      if (container) {
-        const dropEvent = new DragEvent("drop", {
-          bubbles: true,
-          cancelable: true,
-          dataTransfer: dt
-        });
-        container.dispatchEvent(dropEvent);
+  return page.evaluate(
+    async ({
+      selector,
+      b64,
+      innerName,
+      innerMime,
+    }: {
+      selector: string;
+      b64: string;
+      innerName: string;
+      innerMime: string;
+    }) => {
+      const input = document.querySelector(selector) as HTMLInputElement;
+      if (!input) {
+        return { ok: false, reason: "input-not-found" };
       }
 
-      const win = window as any;
-      if (win.angular) {
-        try {
-          const el = win.angular.element(input);
-          const scope = el.scope();
-          if (scope) {
-            const fnNames = ["onFileSelect", "onFileSelected", "handleFileSelect", "uploadFile", "addPhoto"];
-            for (const fn of fnNames) {
-              if (typeof scope[fn] === "function") {
-                scope.$apply(() => { scope[fn]([file]); });
-                console.log(`[INJECT] Angular scope.${fn} tetiklendi.`);
-                break;
-              }
-            }
-          }
-        } catch {}
+      try {
+        const binary = atob(b64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+
+        const file = new File([bytes], innerName, { type: innerMime });
+        const dt = new DataTransfer();
+        dt.items.add(file);
+
+        // ✅ TEK TETİK — File API + change event.
+        //    DragEvent, dispatchEvent("input"), Angular scope çağrısı YOK.
+        input.files = dt.files;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, reason: String(e) };
       }
-
-      return { ok: true, selectedFiles: input.files ? input.files.length : 0 };
-    } catch (e) {
-      return { ok: false, reason: String(e) };
-    }
-  }, {
-    selector: inputSelector,
-    b64: base64Data,
-    fileName,
-    mimeType
-  });
-
-  return result;
+    },
+    {
+      selector: inputSelector,
+      b64: base64Data,
+      innerName: fileName,
+      innerMime: mimeType,
+    },
+  );
 }
 
 function attachDebugLogging(browser: Browser, page: Page, logs: string[]) {
@@ -376,19 +349,6 @@ async function persistDebugScreenshot(page: Page, logs: string[]) {
 }
 
 async function clickCategoryItem(page: Page, label: string) {
-  // Elementin doğrudan (own) text'ini al — child element text'leri hariç
-  function getOwnTextJS() {
-    return `
-      function getOwnText(el) {
-        let text = "";
-        for (const node of el.childNodes) {
-          if (node.nodeType === 3) text += node.textContent;
-        }
-        return text.replace(/\\s+/g, " ").trim().toLowerCase();
-      }
-    `;
-  }
-
   await page.waitForFunction(
     (targetLabel: string) => {
       const normalize = (v: string) => v.replace(/\s+/g, " ").trim().toLowerCase();
@@ -426,13 +386,10 @@ async function clickCategoryItem(page: Page, label: string) {
     }
 
     const candidates = Array.from(document.querySelectorAll<HTMLElement>(
-      "li a, li span, li label, li, a, span.ng-binding, span"
+      "li a, li span, li label, li, a, span.ng-binding, span",
     ));
 
-    // 1. Doğrudan (own) text tam eşleşme — en güvenilir
     let match = candidates.find((el) => getOwnText(el) === target);
-
-    // 2. Full textContent tam eşleşme — sadece leaf node'lar (child element sayısı az)
     if (!match) {
       match = candidates.find((el) => {
         const childElements = el.querySelectorAll("*").length;
@@ -441,7 +398,6 @@ async function clickCategoryItem(page: Page, label: string) {
     }
 
     if (!match) return { ok: false };
-
     match.scrollIntoView({ block: "center" });
     match.click();
     return { ok: true, text: match.textContent?.trim() };
@@ -450,6 +406,15 @@ async function clickCategoryItem(page: Page, label: string) {
   if (!clicked.ok) {
     throw new Error(`Kategori bulunamadi: ${label}`);
   }
+}
+
+const CATEGORY_MODEL_PREFIX: Record<string, string> = {
+  "Apple": "iPhone",
+};
+
+function toCategoryModelLabel(brand: string, model: string): string {
+  const prefix = CATEGORY_MODEL_PREFIX[brand];
+  return prefix ? `${prefix} ${model}` : model;
 }
 
 async function typeIntoContentEditable(
@@ -493,7 +458,6 @@ async function fillInputValue(page: Page, selector: string, value: string) {
       if (!input) {
         throw new Error(`Input bulunamadi: ${targetSelector}`);
       }
-
       input.focus();
       input.value = "";
       input.value = nextValue;
@@ -514,16 +478,13 @@ async function selectByText(page: Page, selector: string, text: string) {
       const option = Array.from(select.options).find(
         (item) => item.text.trim() === targetText,
       );
-      if (!option) {
-        return false;
-      }
+      if (!option) return false;
       select.value = option.value;
       select.dispatchEvent(new Event("change", { bubbles: true }));
       return true;
     },
     text,
   );
-
   if (!ok) {
     throw new Error(`Select icin option bulunamadi: ${selector} -> ${text}`);
   }
@@ -535,13 +496,9 @@ async function selectFirstMatchingSelector(
   text: string,
 ) {
   let lastError: Error | null = null;
-
   for (const selector of selectors) {
     const exists = await page.$(selector);
-    if (!exists) {
-      continue;
-    }
-
+    if (!exists) continue;
     try {
       await selectByText(page, selector, text);
       return selector;
@@ -549,20 +506,13 @@ async function selectFirstMatchingSelector(
       lastError = error instanceof Error ? error : new Error("Select hatasi");
     }
   }
-
-  if (lastError) {
-    throw lastError;
-  }
-
-  throw new Error(
-    `Uygun select bulunamadi: ${selectors.join(", ")} -> ${text}`,
-  );
+  if (lastError) throw lastError;
+  throw new Error(`Uygun select bulunamadi: ${selectors.join(", ")} -> ${text}`);
 }
 
 async function logVisibleSelects(page: Page, logs: string[]) {
   const selectData = await page.evaluate(() => {
     const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
-
     return Array.from(document.querySelectorAll<HTMLSelectElement>("select"))
       .map((select) => {
         const formGroup = select.closest(
@@ -572,7 +522,6 @@ async function logVisibleSelects(page: Page, logs: string[]) {
           formGroup?.querySelector("label")?.textContent ??
           select.closest("label")?.textContent ??
           "";
-
         return {
           name: select.name || "",
           id: select.id || "",
@@ -589,15 +538,11 @@ async function logVisibleSelects(page: Page, logs: string[]) {
   for (const item of selectData) {
     addLog(
       logs,
-      `Select bulundu -> label: ${item.label || "(bos)"} | name: ${item.name || "(bos)"} | id: ${
-        item.id || "(bos)"
-      } | options: ${item.options.join(", ")}`,
+      `Select bulundu -> label: ${item.label || "(bos)"} | name: ${item.name || "(bos)"} | id: ${item.id || "(bos)"} | options: ${item.options.join(", ")}`,
     );
   }
 }
 
-// urun-ozellikleri sayfasındaki bilinen selectler için tercih listesi oluşturur.
-// Bot ayarlarından gelen değerleri birinci sıraya koyar.
 function buildKnownSelectDefaults(s: ReturnType<typeof readSettings>): Record<string, string[]> {
   return {
     a86470:   [s.defaultColor, "Beyaz", "Gümüş", "Siyah", "Lacivert", "Turuncu", "Mavi", "Sarı", "Kırmızı", "Mor", "Yeşil"],
@@ -609,9 +554,6 @@ function buildKnownSelectDefaults(s: ReturnType<typeof readSettings>): Record<st
   };
 }
 
-// Sayfadaki tüm boş/placeholder selectleri otomatik doldurur.
-// Bilinen select isimleri için bot ayarlarındaki tercihler kullanır,
-// bilinmeyenler için listing verisiyle eşleştirmeye ya da ilk opsiyona düşer.
 async function fillAllVisibleSelects(
   page: Page,
   logs: string[],
@@ -621,7 +563,6 @@ async function fillAllVisibleSelects(
   const normalize = (s: string) =>
     s.replace(/\s+/g, " ").trim().toLocaleLowerCase("tr-TR");
 
-  // Atlanacak select isimleri (konum seçimleri zaten önceki adımda dolduruldu)
   const SKIP_NAMES = new Set(["city", "town", "quarter", "country", "residenceInput", "taxOffice"]);
 
   const listingValues = Object.values(listing)
@@ -643,14 +584,9 @@ async function fillAllVisibleSelects(
             s.closest("label")?.textContent ??
             "";
           return {
-            selector: s.name
-              ? `select[name="${s.name}"]`
-              : s.id
-                ? `select#${s.id}`
-                : "",
+            selector: s.name ? `select[name="${s.name}"]` : s.id ? `select#${s.id}` : "",
             name: s.name || s.id || "",
             label: norm(label),
-            // placeholder seçenekleri filtrele
             options: Array.from(s.options)
               .map((o) => norm(o.textContent ?? ""))
               .filter((o) => !PLACEHOLDER.has(o)),
@@ -661,16 +597,13 @@ async function fillAllVisibleSelects(
 
   addLog(logs, `Sayfada ${selectInfos.length} doldurulabilir select bulundu.`, "INFO");
 
-  // Döngüden önce bir kez oluştur
   const knownSelectMap = buildKnownSelectDefaults(botSettings ?? readSettings());
 
   for (const info of selectInfos) {
     if (SKIP_NAMES.has(info.name)) continue;
 
-    // Mevcut seçili değer zaten anlamlıysa atla
     const currentVal: string = await page.$eval(info.selector, (el) =>
-      (el as HTMLSelectElement).options[(el as HTMLSelectElement).selectedIndex]
-        ?.textContent?.trim() ?? "",
+      (el as HTMLSelectElement).options[(el as HTMLSelectElement).selectedIndex]?.textContent?.trim() ?? "",
     ).catch(() => "");
 
     const currentNorm = normalize(currentVal);
@@ -681,7 +614,6 @@ async function fillAllVisibleSelects(
 
     let chosen: string | null = null;
 
-    // 1. Bilinen select adları için bot ayarlarından gelen tercihler
     const knownDefaults = knownSelectMap[info.name];
     if (knownDefaults) {
       for (const pref of knownDefaults) {
@@ -689,13 +621,11 @@ async function fillAllVisibleSelects(
         const match = info.options.find((o) => normalize(o) === prefNorm);
         if (match) { chosen = match; break; }
       }
-      // Listedeki renk varsa onu tercih et (renk selecti için)
       if (info.name === "a86470" && listing.color) {
         const colorNorm = normalize(String(listing.color));
         const colorMatch = info.options.find((o) => normalize(o).includes(colorNorm) || colorNorm.includes(normalize(o)));
         if (colorMatch) chosen = colorMatch;
       }
-      // Listedeki depolama alanı varsa bot ayarı yerine onu tercih et
       if (info.name === "a101170" && listing.storage) {
         const storageNorm = normalize(String(listing.storage));
         const storageMatch = info.options.find((o) => normalize(o).includes(storageNorm) || storageNorm.includes(normalize(o)));
@@ -703,7 +633,6 @@ async function fillAllVisibleSelects(
       }
     }
 
-    // 2. listing verisinden eşleştir
     if (!chosen) {
       for (const opt of info.options) {
         const optNorm = normalize(opt);
@@ -714,7 +643,6 @@ async function fillAllVisibleSelects(
       }
     }
 
-    // 3. İlk opsiyona düş
     if (!chosen) chosen = info.options[0];
 
     try {
@@ -745,106 +673,56 @@ async function selectByLabelText(
 
       const normalizedCandidates = candidates.map(normalize);
       const groups = Array.from(
-        document.querySelectorAll<HTMLElement>(
-          "li, .form-group, .classifiedInfo, .row",
-        ),
+        document.querySelectorAll<HTMLElement>("li, .form-group, .classifiedInfo, .row"),
       );
 
       const findSelectFromGroup = (group: HTMLElement) => {
         const select = group.querySelector<HTMLSelectElement>("select");
-        if (select) {
-          return select;
-        }
-
+        if (select) return select;
         const nextSelect = group.nextElementSibling?.querySelector?.("select");
         return nextSelect instanceof HTMLSelectElement ? nextSelect : null;
       };
 
       for (const group of groups) {
-        const labelText = normalize(
-          group.querySelector("label")?.textContent ?? "",
-        );
-        if (!labelText) {
-          continue;
-        }
-
-        if (
-          !normalizedCandidates.some((candidate: string) =>
-            labelText.includes(candidate),
-          )
-        ) {
-          continue;
-        }
+        const labelText = normalize(group.querySelector("label")?.textContent ?? "");
+        if (!labelText) continue;
+        if (!normalizedCandidates.some((candidate: string) => labelText.includes(candidate))) continue;
 
         const select = findSelectFromGroup(group);
-        if (!select) {
-          continue;
-        }
+        if (!select) continue;
 
         const option = Array.from(select.options).find(
-          (item) =>
-            normalize(item.textContent ?? "") === normalize(targetOption),
+          (item) => normalize(item.textContent ?? "") === normalize(targetOption),
         );
-
         if (!option) {
-          return {
-            found: true,
-            selected: false,
-            labelText,
-            selectName: select.name || select.id || "",
-          };
+          return { found: true, selected: false, labelText, selectName: select.name || select.id || "" };
         }
-
         select.value = option.value;
         select.dispatchEvent(new Event("change", { bubbles: true }));
-        return {
-          found: true,
-          selected: true,
-          labelText,
-          selectName: select.name || select.id || "",
-        };
+        return { found: true, selected: true, labelText, selectName: select.name || select.id || "" };
       }
-
       return { found: false, selected: false, labelText: "", selectName: "" };
     },
     { candidates: labelCandidates, targetOption: optionText },
   );
 
   if (!matched.found) {
-    throw new Error(
-      `Label ile select bulunamadi: ${labelCandidates.join(" / ")} -> ${optionText}`,
-    );
+    throw new Error(`Label ile select bulunamadi: ${labelCandidates.join(" / ")} -> ${optionText}`);
   }
-
   if (!matched.selected) {
-    throw new Error(
-      `Label bulundu ama option bulunamadi: ${matched.labelText} (${matched.selectName}) -> ${optionText}`,
-    );
+    throw new Error(`Label bulundu ama option bulunamadi: ${matched.labelText} (${matched.selectName}) -> ${optionText}`);
   }
 }
 
 function inferProductTypeForForm(product: string) {
   const lower = product.toLocaleLowerCase("tr-TR");
   if (lower.includes("tampon")) {
-    if (
-      lower.includes("arka tampon") ||
-      lower.includes("tampon arka") ||
-      lower.includes("arka")
-    ) {
+    if (lower.includes("arka tampon") || lower.includes("tampon arka") || lower.includes("arka")) {
       return "Tampon (Arka)";
     }
-
-    if (
-      lower.includes("ön tampon") ||
-      lower.includes("on tampon") ||
-      lower.includes("tampon ön") ||
-      lower.includes("tampon on") ||
-      lower.includes("ön") ||
-      lower.includes("on")
-    ) {
+    if (lower.includes("ön tampon") || lower.includes("on tampon") || lower.includes("tampon ön") || lower.includes("tampon on") || lower.includes("ön") || lower.includes("on")) {
       return "Tampon (Ön)";
     }
-
     return "Tampon (Ön)";
   }
   if (lower.includes("far")) return "Far";
@@ -884,28 +762,13 @@ async function selectOptionByHeuristic(
       const targetText = normalize(rawTargetText);
       const options = Array.from(select.options);
 
-      console.log(`[HEURISTIC] Hedef: "${rawTargetText}" (normalized: "${targetText}")`);
-      console.log(`[HEURISTIC] Mevcut opsiyonlar:`, options.map(o => o.text.trim()));
+      const exact = options.find((item) => normalize(item.textContent ?? "") === targetText);
+      const includes = options.find((item) => normalize(item.textContent ?? "").includes(targetText));
+      const reverseIncludes = options.find((item) => targetText.includes(normalize(item.textContent ?? "")));
 
-      const exact = options.find(
-        (item) => normalize(item.textContent ?? "") === targetText,
-      );
-      const includes = options.find((item) =>
-        normalize(item.textContent ?? "").includes(targetText),
-      );
-      const reverseIncludes = options.find((item) =>
-        targetText.includes(normalize(item.textContent ?? "")),
-      );
-      
       const chosen = exact || includes || reverseIncludes;
+      if (!chosen) return null;
 
-      if (!chosen) {
-        console.warn(`[HEURISTIC] Uygun opsiyon bulunamadı: "${rawTargetText}"`);
-        return null;
-      }
-
-      console.log(`[HEURISTIC] Seçilen: "${chosen.text}" (Value: ${chosen.value}) [Exact: ${!!exact}, Includes: ${!!includes}, Rev: ${!!reverseIncludes}]`);
-      
       select.value = chosen.value;
       select.dispatchEvent(new Event("change", { bubbles: true }));
       return { label: chosen.text, value: chosen.value };
@@ -914,11 +777,8 @@ async function selectOptionByHeuristic(
   );
 
   if (!result) {
-    throw new Error(
-      `Heuristic option bulunamadi: ${selector} -> ${targetText}`,
-    );
+    throw new Error(`Heuristic option bulunamadi: ${selector} -> ${targetText}`);
   }
-  
   return result;
 }
 
@@ -928,91 +788,61 @@ async function selectUsingSelectorsWithHeuristic(
   text: string,
 ) {
   let lastError: Error | null = null;
-
   for (const selector of selectors) {
     const exists = await page.$(selector);
-    if (!exists) {
-      continue;
-    }
-
+    if (!exists) continue;
     try {
       await selectByText(page, selector, text);
       return { selector, mode: "exact" as const };
     } catch (error) {
-      lastError =
-        error instanceof Error ? error : new Error("Select exact hatasi");
+      lastError = error instanceof Error ? error : new Error("Select exact hatasi");
     }
-
     try {
       await selectOptionByHeuristic(page, selector, text);
       return { selector, mode: "heuristic" as const };
     } catch (error) {
-      lastError =
-        error instanceof Error ? error : new Error("Select heuristic hatasi");
+      lastError = error instanceof Error ? error : new Error("Select heuristic hatasi");
     }
   }
-
-  if (lastError) {
-    throw lastError;
-  }
-
-  throw new Error(
-    `Uygun select bulunamadi: ${selectors.join(", ")} -> ${text}`,
-  );
+  if (lastError) throw lastError;
+  throw new Error(`Uygun select bulunamadi: ${selectors.join(", ")} -> ${text}`);
 }
 
 async function expandExistingSelectors(page: Page, selectors: string[]) {
   const resolved = new Set<string>();
-
   for (const selector of selectors) {
     if (selector.includes("^=")) {
       const handles = await page.$$(selector);
       for (const handle of handles) {
-        const name = await handle.evaluate(
-          (element: Element) => (element as HTMLSelectElement).name || "",
-        );
-        const id = await handle.evaluate(
-          (element: Element) => (element as HTMLSelectElement).id || "",
-        );
-
-        if (name) {
-          resolved.add(`select[name="${name}"]`);
-        } else if (id) {
-          resolved.add(`select#${id}`);
-        }
+        const name = await handle.evaluate((element: Element) => (element as HTMLSelectElement).name || "");
+        const id = await handle.evaluate((element: Element) => (element as HTMLSelectElement).id || "");
+        if (name) resolved.add(`select[name="${name}"]`);
+        else if (id) resolved.add(`select#${id}`);
       }
       continue;
     }
-
     resolved.add(selector);
   }
-
   return Array.from(resolved);
 }
 
 async function ensureCheckboxChecked(page: Page, selector: string) {
   const exists = await page.$(selector);
-  if (!exists) {
-    throw new Error(`Checkbox bulunamadi: ${selector}`);
-  }
+  if (!exists) throw new Error(`Checkbox bulunamadi: ${selector}`);
 
   await page.$eval(selector, (element: Element) => {
     const input = element as HTMLInputElement;
     if (!input.checked) {
       input.checked = true;
-      input.dispatchEvent(new Event('change', { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
       try {
         const win = window as any;
         if (win.angular) {
           const el = win.angular.element(input);
           const scope = el.scope() || el.isolateScope();
-          if (scope) {
-            scope.$apply();
-          }
+          if (scope) scope.$apply();
         }
-      } catch (e) {
-        console.warn('Angular $apply failed:', e);
-      }
+      } catch {}
     }
   });
 }
@@ -1026,39 +856,31 @@ async function clickContinueButton(page: Page) {
 
   for (const selector of primarySelectors) {
     const button = await page.$(selector);
-    if (!button) {
-      continue;
-    }
+    if (!button) continue;
 
     try {
       await page.waitForFunction(
         (targetSelector: string) => {
-          const buttonEl =
-            document.querySelector<HTMLButtonElement>(targetSelector);
+          const buttonEl = document.querySelector<HTMLButtonElement>(targetSelector);
           return !!buttonEl && !buttonEl.disabled;
         },
         { timeout: 10_000 },
         selector,
       );
-    } catch {
-      // fallback akisi asagida denenecek
-    }
+    } catch {}
 
     try {
       await page.$eval(selector, (element: Element) => {
         const buttonEl = element as HTMLButtonElement;
         buttonEl.scrollIntoView({ block: "center", inline: "center" });
       });
-
       const handle = await page.$(selector);
       const box = await handle?.boundingBox();
       if (box) {
         await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
         return `mouse:${selector}`;
       }
-    } catch {
-      // js click fallback denenecek
-    }
+    } catch {}
 
     await page.$eval(selector, (element: Element) => {
       const buttonEl = element as HTMLButtonElement;
@@ -1069,41 +891,27 @@ async function clickContinueButton(page: Page) {
   }
 
   const clickedByText = await page.evaluate(() => {
-    const buttons = Array.from(
-      document.querySelectorAll<HTMLButtonElement>("button"),
-    );
+    const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button"));
     const target = buttons.find(
       (button) => button.innerText.replace(/\s+/g, " ").trim() === "Devam",
     );
-    if (!target) {
-      return false;
-    }
-
+    if (!target) return false;
     target.scrollIntoView({ block: "center" });
     target.click();
     return true;
   });
 
-  if (clickedByText) {
-    return "text:Devam";
-  }
+  if (clickedByText) return "text:Devam";
 
   const submittedByForm = await page.evaluate(() => {
-    const button = document.querySelector<HTMLButtonElement>(
-      "button.add-classified-submit",
-    );
+    const button = document.querySelector<HTMLButtonElement>("button.add-classified-submit");
     const form = button?.closest("form");
-    if (!form) {
-      return false;
-    }
-
+    if (!form) return false;
     form.requestSubmit();
     return true;
   });
 
-  if (submittedByForm) {
-    return "form:requestSubmit";
-  }
+  if (submittedByForm) return "form:requestSubmit";
 
   throw new Error("Devam butonu bulunamadi veya tetiklenemedi.");
 }
@@ -1115,8 +923,7 @@ async function dismissDraftResumeModal(page: Page, logs: string[]) {
         const buttons = Array.from(document.querySelectorAll("button"));
         return buttons.some(
           (button) =>
-            button.innerText.replace(/\s+/g, " ").trim() ===
-            "Hayır, Yeni Bir İlan Vermek İstiyorum",
+            button.innerText.replace(/\s+/g, " ").trim() === "Hayır, Yeni Bir İlan Vermek İstiyorum",
         );
       },
       { timeout: 10_000 },
@@ -1130,10 +937,8 @@ async function dismissDraftResumeModal(page: Page, logs: string[]) {
   }
 
   addLog(logs, "Taslak devam modalı bulundu.");
-
   const findBtnText = "Hayır, Yeni Bir İlan Vermek İstiyorum";
 
-  // Method 1: DOM click via page.evaluate
   let dismissed = await page.evaluate((text) => {
     const buttons = Array.from(document.querySelectorAll("button"));
     const target = buttons.find(
@@ -1146,15 +951,11 @@ async function dismissDraftResumeModal(page: Page, logs: string[]) {
   }, findBtnText);
 
   await sleep(1200);
-
   let stillVisible = await page.evaluate((text) => {
     const buttons = Array.from(document.querySelectorAll("button"));
-    return buttons.some(
-      (b) => b.innerText.replace(/\s+/g, " ").trim() === text,
-    );
+    return buttons.some((b) => b.innerText.replace(/\s+/g, " ").trim() === text);
   }, findBtnText);
 
-  // Method 2: Puppeteer native click
   if (!dismissed || stillVisible) {
     if (dismissed && stillVisible) {
       addLog(logs, "DOM click işe yaramadı, Puppeteer native click deneniyor...", "WARN");
@@ -1179,9 +980,7 @@ async function dismissDraftResumeModal(page: Page, logs: string[]) {
 
       stillVisible = await page.evaluate((text) => {
         const buttons = Array.from(document.querySelectorAll("button"));
-        return buttons.some(
-          (b) => b.innerText.replace(/\s+/g, " ").trim() === text,
-        );
+        return buttons.some((b) => b.innerText.replace(/\s+/g, " ").trim() === text);
       }, findBtnText);
 
       if (!stillVisible) dismissed = true;
@@ -1190,7 +989,6 @@ async function dismissDraftResumeModal(page: Page, logs: string[]) {
     }
   }
 
-  // Method 3: AngularJS scope fallback
   if (!dismissed) {
     addLog(logs, "AngularJS scope fallback deneniyor...", "WARN");
     try {
@@ -1226,21 +1024,43 @@ async function dismissDraftResumeModal(page: Page, logs: string[]) {
   }
 
   if (!dismissed) {
-    throw new Error(
-      "Taslak modalı kapatılamadı (DOM click, Puppeteer click ve AngularJS fallback denendi).",
-    );
+    throw new Error("Taslak modalı kapatılamadı (DOM click, Puppeteer click ve AngularJS fallback denendi).");
   }
 
   addLog(logs, "Taslak modalında 'Hayır, Yeni Bir İlan Vermek İstiyorum' seçildi.");
   await sleep(800);
 }
 
+async function dismissUsageLimitModal(page: Page, logs: string[]) {
+  const foundModal = await page
+    .waitForFunction(
+      () => {
+        const buttons = Array.from(document.querySelectorAll(".dialog-content.dialog-modern button"));
+        return buttons.some((b) => b.textContent?.replace(/\s+/g, " ").trim() === "Tamam");
+      },
+      { timeout: 4_000 },
+    )
+    .then(() => true)
+    .catch(() => false);
+
+  if (!foundModal) return;
+
+  addLog(logs, "İlan paketi kullanım limiti uyarı modalı bulundu, 'Tamam' tıklanıyor...", "WARN");
+
+  await page.evaluate(() => {
+    const buttons = Array.from(document.querySelectorAll(".dialog-content.dialog-modern button"));
+    const target = buttons.find((b) => b.textContent?.replace(/\s+/g, " ").trim() === "Tamam") as HTMLButtonElement | undefined;
+    if (target) { target.scrollIntoView({ block: "center" }); target.click(); }
+  });
+
+  await sleep(500);
+  addLog(logs, "İlan paketi uyarı modalı kapatıldı.", "OK");
+}
+
 async function clickStepThreeContinue(page: Page) {
   await page.waitForFunction(
     () => {
-      const buttons = Array.from(
-        document.querySelectorAll<HTMLButtonElement>("button"),
-      );
+      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button"));
       const btn = buttons.find(
         (button) => button.innerText.replace(/\s+/g, " ").trim() === "Devam Et",
       );
@@ -1257,26 +1077,17 @@ async function clickStepThreeContinue(page: Page) {
   await sleep(1_000);
 
   const clicked = await page.evaluate(() => {
-    const buttons = Array.from(
-      document.querySelectorAll<HTMLButtonElement>("button"),
-    );
+    const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button"));
     const target = buttons.find(
       (button) => button.innerText.replace(/\s+/g, " ").trim() === "Devam Et",
     );
-
-    if (!target) {
-      return false;
-    }
-
+    if (!target) return false;
     target.scrollIntoView({ block: "center" });
     target.click();
     return true;
   });
 
-  if (!clicked) {
-    throw new Error("Adim 3 'Devam Et' butonu bulunamadi veya tiklanamadi.");
-  }
-
+  if (!clicked) throw new Error("Adim 3 'Devam Et' butonu bulunamadi veya tiklanamadi.");
   return "text:Devam Et";
 }
 
@@ -1284,9 +1095,7 @@ async function dismissDopingModal(page: Page, logs: string[]) {
   const foundModal = await page
     .waitForFunction(
       () => {
-        const popup = document.querySelector<HTMLElement>(
-          ".first-classified-popup",
-        );
+        const popup = document.querySelector<HTMLElement>(".first-classified-popup");
         return !!popup;
       },
       { timeout: 5_000 },
@@ -1302,22 +1111,14 @@ async function dismissDopingModal(page: Page, logs: string[]) {
   addLog(logs, "Doping modalı bulundu.");
 
   const clicked = await page.evaluate(() => {
-    const closeButton = document.querySelector<HTMLElement>(
-      ".first-classified-popup a.dialog-close",
-    );
-    if (!closeButton) {
-      return false;
-    }
-
+    const closeButton = document.querySelector<HTMLElement>(".first-classified-popup a.dialog-close");
+    if (!closeButton) return false;
     closeButton.scrollIntoView({ block: "center" });
     closeButton.click();
     return true;
   });
 
-  if (!clicked) {
-    throw new Error("Doping modalı bulundu ama kapatma butonuna tıklanamadı.");
-  }
-
+  if (!clicked) throw new Error("Doping modalı bulundu ama kapatma butonuna tıklanamadı.");
   addLog(logs, "Doping modalı kapatıldı.");
   await sleep(800);
 }
@@ -1325,9 +1126,7 @@ async function dismissDopingModal(page: Page, logs: string[]) {
 async function clickDopingContinueButton(page: Page) {
   await page.waitForFunction(
     () => {
-      const buttons = Array.from(
-        document.querySelectorAll<HTMLButtonElement>("button"),
-      );
+      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button"));
       return buttons.some(
         (button) => button.innerText.replace(/\s+/g, " ").trim() === "Devam Et",
       );
@@ -1336,53 +1135,37 @@ async function clickDopingContinueButton(page: Page) {
   );
 
   const clicked = await page.evaluate(() => {
-    const buttons = Array.from(
-      document.querySelectorAll<HTMLButtonElement>("button"),
-    );
+    const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button"));
     const target = buttons.find(
       (button) => button.innerText.replace(/\s+/g, " ").trim() === "Devam Et",
     );
-
-    if (!target) {
-      return false;
-    }
-
+    if (!target) return false;
     target.scrollIntoView({ block: "center" });
     target.click();
     return true;
   });
 
-  if (!clicked) {
-    throw new Error(
-      "Doping sayfasindaki 'Devam Et' butonu bulunamadi veya tiklanamadi.",
-    );
-  }
-
+  if (!clicked) throw new Error("Doping sayfasindaki 'Devam Et' butonu bulunamadi veya tiklanamadi.");
   return "text:Devam Et";
 }
 
 export async function publishListing(listing: ListingDraft, mode: PublishMode) {
-  // ── Bot Ayarlarını Yükle ──────────────────────────────────────────────────
   const botSettings = readSettings();
   _speedMultiplier = botSettings.speedMultiplier ?? 1;
 
-  // Ayarlardan gelen varsayılanları listing'e uygula (listing'de yoksa)
   if (!listing.color && botSettings.defaultColor) listing = { ...listing, color: botSettings.defaultColor };
   if (!listing.storage && botSettings.defaultStorage) listing = { ...listing, storage: botSettings.defaultStorage };
   if (!listing.town && botSettings.defaultTown) listing = { ...listing, town: botSettings.defaultTown };
   if (!listing.quarter && botSettings.defaultQuarter) listing = { ...listing, quarter: botSettings.defaultQuarter };
 
-  // Fiyat ayarı
   if (botSettings.priceAdjustPercent !== 0) {
     listing = { ...listing, price: Math.round(listing.price * (1 + botSettings.priceAdjustPercent / 100)) };
   }
 
-  // Açıklama eki
   if (botSettings.descriptionSuffix && !listing.description.endsWith(botSettings.descriptionSuffix)) {
     listing = { ...listing, description: listing.description + " " + botSettings.descriptionSuffix };
   }
 
-  // Reset step counter and start timer for this publish run
   _stepCounter = 0;
   _publishStartTime = Date.now();
 
@@ -1393,7 +1176,6 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
   addLog(logs, `  Fiyat: ${listing.price} TL | Görsel: ${listing.imagePath || listing.imageUrl || "(yok)"}`, "STEP");
   addLog(logs, `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "STEP");
 
-  // ──── ADIM 0: TARAYICI BAĞLANTISI ────
   stepLog(logs, "TARAYICI BAĞLANTISI");
 
   let browser = await tryConnectToExistingBrowser(logs);
@@ -1413,8 +1195,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       shouldCloseBrowser = true;
       addLog(logs, "Yeni tarayıcı oturumu açıldı.", "OK");
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Tarayıcı başlatılamadı";
+      const message = error instanceof Error ? error.message : "Tarayıcı başlatılamadı";
       addLog(logs, "Tarayıcı açılamadı. Muhtemelen aynı profil zaten açık.", "ERROR");
       addLog(logs, "Uygulamadaki 'Tarayıcıyı aç' veya 'Sahibinden oturum aç' butonuyla mevcut oturumu kullanın.", "WARN");
       addLog(logs, message, "ERROR");
@@ -1429,17 +1210,12 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
   addLog(logs, "Yeni sayfa (tab) oluşturuldu.", "OK");
 
   try {
-    // ──── ADIM 1: FOTOĞRAF & VİDEO ────
     addLog(logs, "Yeni ilan sayfası açılıyor (ilan-ver/fotograf-video)...", "INFO");
-    await page.goto(
-      "https://banaozel.sahibinden.com/ilan-ver/fotograf-video",
-      {
-        waitUntil: "domcontentloaded",
-      },
-    );
+    await page.goto("https://banaozel.sahibinden.com/ilan-ver/fotograf-video", {
+      waitUntil: "domcontentloaded",
+    });
     addLog(logs, `Sayfa yüklendi. URL: ${page.url()}`, "OK");
 
-    // /yeni → fotograf-video?classifiedId=XXXXX redirect'ini yakala
     addLog(logs, "Redirect bekleniyor (yeni draft oluşturuluyor)...", "INFO");
     try {
       await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 10000 });
@@ -1449,36 +1225,29 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
     const afterRedirectUrl = page.url();
     addLog(logs, `Redirect sonrası URL: ${afterRedirectUrl}`, "OK");
 
-    // ═══════════════════════════════════════════════════════════════════
-    // ADIM 1: FOTOĞRAF & VİDEO
-    // ═══════════════════════════════════════════════════════════════════
     if (afterRedirectUrl.includes("fotograf-video")) {
       stepLog(logs, "FOTOĞRAF & VİDEO");
       await dismissDraftResumeModal(page, logs);
 
-      // Modal gecikmeli gelebilir, 8sn boyunca poll et
       for (let i = 0; i < 4; i++) {
         await sleep(2000);
         const modalStillUp = await page.evaluate(() => {
           return Array.from(document.querySelectorAll("button")).some(
-            (b) =>
-              b.innerText.replace(/\s+/g, " ").trim() ===
-              "Hayır, Yeni Bir İlan Vermek İstiyorum",
+            (b) => b.innerText.replace(/\s+/g, " ").trim() === "Hayır, Yeni Bir İlan Vermek İstiyorum",
           );
         });
         if (!modalStillUp) break;
-        addLog(
-          logs,
-          `Taslak modalı hala görünüyor, tekrar kapatılıyor (${i + 1}/4)...`,
-          "WARN",
-        );
+        addLog(logs, `Taslak modalı hala görünüyor, tekrar kapatılıyor (${i + 1}/4)...`, "WARN");
         await dismissDraftResumeModal(page, logs);
       }
-      
+
       const imagePath = await resolveImagePath(listing);
       if (!imagePath || !fs.existsSync(imagePath)) {
-        addLog(logs, `Görsel dosyası bulunamadı veya belirtilmemiş. Yol: ${imagePath || "(boş)"}`, "WARN");
+        addLog(logs, `Görsel dosyası bulunamadı veya belirtilmemiş. Yol: ${imagePath || "(boş)"}`, "ERROR");
         await persistDebugScreenshot(page, logs);
+        const totalElapsedNoImg = ((Date.now() - _publishStartTime) / 1000).toFixed(1);
+        addLog(logs, `━━━ PUBLISH DURDURULDU — görsel yok (${totalElapsedNoImg}s) ━━━`, "ERROR");
+        return { ok: false, mode, logs, error: "Görsel dosyası bulunamadı veya belirtilmemiş." };
       } else {
         const fileSize = fs.statSync(imagePath).size;
         addLog(logs, `Görsel doğrulandı: ${imagePath} (${(fileSize / 1024).toFixed(1)} KB)`, "OK");
@@ -1504,13 +1273,12 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         let beforeCount = await getUploadedCount();
         addLog(logs, `Mevcut görsel sayısı: ${beforeCount}`, "DEBUG");
 
-        // File input'u bul — butona tıklamadan direkt uploadFile kullan
         addLog(logs, "File input (#uploadImageField) aranıyor...", "INFO");
         await page.waitForSelector("#uploadImageField", { visible: false, timeout: 15_000 });
         const inputs = await page.$$("#uploadImageField");
         addLog(logs, `Bulunan input sayısı: ${inputs.length}`, "DEBUG");
-        
-        let fileInput = inputs[0]; // İlk input'u al
+
+        let fileInput = inputs[0];
         if (!fileInput) {
           addLog(logs, "File input bulunamadı!", "ERROR");
           await persistDebugScreenshot(page, logs);
@@ -1521,26 +1289,26 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
           });
           addLog(logs, "File input etkinleştirildi.", "OK");
 
-          let method = '';
+          let method = "";
           let uploaded = beforeCount;
           let uploadSuccess = false;
 
-          // ── Yöntem 1: CDP DOM.setFileInputFiles + Angular tetikleme ──
+          // ── Yöntem 1: CDP (tek tetik) ──
           addLog(logs, "Yöntem 1: CDP DOM.setFileInputFiles...", "INFO");
-          method = 'cdp';
-          const cdpOk = await uploadViaCDP(page, '#uploadImageField', imagePath, logs);
+          method = "cdp";
+          const cdpOk = await uploadViaCDP(page, "#uploadImageField", imagePath, logs);
           if (cdpOk) {
-            // CDP başarılı — Angular tetiklendi, network upload'ı bekle
             addLog(logs, "CDP başarılı, upload işlemi bekleniyor...", "INFO");
             await sleep(3000);
-            // Network üzerinden upload isteğini bekle
             try {
               await page.waitForFunction(
                 () => {
-                  const imgs = document.querySelectorAll('img[src*="klassifiye"], img[src*="upload"], img[src*="photo"], .classified-photo-list li, [class*="photo-list"] li, [class*="photo"] img');
+                  const imgs = document.querySelectorAll(
+                    'img[src*="klassifiye"], img[src*="upload"], img[src*="photo"], .classified-photo-list li, [class*="photo-list"] li, [class*="photo"] img',
+                  );
                   return imgs.length > 0;
                 },
-                { timeout: 15000 }
+                { timeout: 15000 },
               );
               addLog(logs, "Görsel upload tamamlandı (DOM'da görsel tespit edildi).", "OK");
             } catch {
@@ -1549,26 +1317,27 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
             uploaded = await getUploadedCount();
           }
 
-          // ── Yöntem 2 (sadece CDP başarısızsa): Base64 Injection ──
+          // ── Yöntem 2: Base64 Injection (sadece CDP başarısızsa) ──
           if (!cdpOk) {
             addLog(logs, "Yöntem 2: Base64 Injection...", "WARN");
-            method = 'base64';
-            const injectResult = await injectImageViaBase64(page, '#uploadImageField', imagePath);
+            method = "base64";
+            const injectResult = await injectImageViaBase64(page, "#uploadImageField", imagePath);
             addLog(logs, `Injection sonucu: ${JSON.stringify(injectResult)}`, "DEBUG");
             await sleep(3000);
             try {
               await page.waitForFunction(
                 () => {
-                  const imgs = document.querySelectorAll('img[src*="klassifiye"], img[src*="upload"], img[src*="photo"], .classified-photo-list li, [class*="photo-list"] li, [class*="photo"] img');
+                  const imgs = document.querySelectorAll(
+                    'img[src*="klassifiye"], img[src*="upload"], img[src*="photo"], .classified-photo-list li, [class*="photo-list"] li, [class*="photo"] img',
+                  );
                   return imgs.length > 0;
                 },
-                { timeout: 12000 }
+                { timeout: 12000 },
               );
             } catch {}
             uploaded = await getUploadedCount();
           }
 
-          // Sonuç raporu
           uploadSuccess = uploaded > beforeCount;
           if (uploadSuccess) {
             addLog(logs, `GÖRSEL YÜKLEME BAŞARILI ✓ (Önce: ${beforeCount}, Sonra: ${uploaded}, Yöntem: ${method})`, "OK");
@@ -1579,14 +1348,11 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         }
       }
 
-      // Fotoğraf sayfasında Devam tıkla
       addLog(logs, "Fotoğraf adımında 'Devam Et' tıklanıyor...", "INFO");
-      await sleep(300);
+      await sleep(1000);
       try {
         await clickContinueButton(page);
-        await page
-          .waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20_000 })
-          .catch(() => null);
+        await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => null);
         addLog(logs, `Fotoğraf sonrası URL: ${page.url()}`, "OK");
       } catch (navErr) {
         addLog(logs, `Fotoğraf Devam Et hatası: ${navErr instanceof Error ? navErr.message : "?"}`, "WARN");
@@ -1595,9 +1361,6 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       addLog(logs, `Fotoğraf-video sayfası algılanmadı (redirect olmuş olabilir). URL: ${page.url()}`, "WARN");
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // ADIM 2: KURALLAR ONAYI (adim-2) — direkt redirect olunca buraya düşer
-    // ═══════════════════════════════════════════════════════════════════
     if (page.url().includes("adim-2")) {
       stepLog(logs, "ADIM 2 — KURALLAR ONAYI");
       try {
@@ -1638,36 +1401,20 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // ADIM 3: İLAN DETAYLARI (ilan-bilgileri sayfası)
-    // ═══════════════════════════════════════════════════════════════════
     if (page.url().includes("ilan-bilgileri")) {
       stepLog(logs, "İLAN DETAYLARI");
-      
-      // Form yüklenmesini bekle
-      await page.waitForSelector('input[name="addClassifiedTitle"]', {
-        timeout: SELECTOR_TIMEOUT_MS * 3,
-      });
+
+      await page.waitForSelector('input[name="addClassifiedTitle"]', { timeout: SELECTOR_TIMEOUT_MS * 3 });
       addLog(logs, "İlan detay formu yüklendi.", "OK");
 
-      // ── Başlık ──
       addLog(logs, "Başlık dolduruluyor...", "INFO");
-      await fillInputValue(
-        page,
-        'input[name="addClassifiedTitle"]',
-        listing.name,
-      );
+      await fillInputValue(page, 'input[name="addClassifiedTitle"]', listing.name);
       addLog(logs, `Başlık → "${listing.name}"`, "OK");
 
-      // ── Açıklama ──
       addLog(logs, "Açıklama dolduruluyor...", "INFO");
       try {
         const editorSelector = '[contenteditable="true"][name="Açıklama"], .ta-bind[contenteditable="true"], #taTextElement, div.ta-scroll-window [contenteditable="true"]';
-        await typeIntoContentEditable(
-          page,
-          editorSelector,
-          listing.description,
-        );
+        await typeIntoContentEditable(page, editorSelector, listing.description);
         addLog(logs, `Açıklama dolduruldu (${listing.description.length} karakter).`, "OK");
       } catch (error) {
         addLog(logs, `Açıklama birincil yöntem başarısız: ${error instanceof Error ? error.message : "?"}. Fallback deneniyor...`, "WARN");
@@ -1682,7 +1429,6 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         }
       }
 
-      // ── Fiyat ──
       addLog(logs, "Fiyat dolduruluyor...", "INFO");
       try {
         const priceSelector = 'input[name="price"], #addClassifiedPrice, .classified-price input';
@@ -1693,54 +1439,36 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         addLog(logs, `Fiyat alanı bulunamadı: ${error instanceof Error ? error.message : "?"}`, "WARN");
       }
 
-      // ── Select Alanları ──
       addLog(logs, "Sayfadaki select alanları taranıyor...", "DEBUG");
       await logVisibleSelects(page, logs);
 
-      const productType = inferProductTypeForForm(
-        listing.productType || listing.product,
-      );
+      const productType = inferProductTypeForForm(listing.productType || listing.product);
 
       stepLog(logs, "SELECT ALANLARI DOLDURMA");
 
-      // ── Ürün Tipi ──
       try {
         const matched = await selectUsingSelectorsWithHeuristic(
           page,
           await expandExistingSelectors(page, [
-            'select[name="a91472"]',
-            'select[name="a88250"]',
-            'select[name="a88320"]',
-            'select[name="a88278"]',
-            'select[name^="a914"]',
-            'select[name^="a882"]',
-            'select[name^="a883"]',
+            'select[name="a91472"]', 'select[name="a88250"]', 'select[name="a88320"]',
+            'select[name="a88278"]', 'select[name^="a914"]', 'select[name^="a882"]', 'select[name^="a883"]',
           ]),
           productType,
         );
         addLog(logs, `Ürün tipi → "${productType}" (${matched.mode}, ${matched.selector})`, "OK");
       } catch {
         try {
-          await selectByLabelText(
-            page,
-            ["urun tipi", "parça tipi", "parca tipi", "ürün türü", "urun turu"],
-            productType,
-          );
+          await selectByLabelText(page, ["urun tipi", "parça tipi", "parca tipi", "ürün türü", "urun turu"], productType);
           addLog(logs, `Ürün tipi → "${productType}" (label fallback)`, "OK");
         } catch (error) {
           addLog(logs, `Ürün tipi seçilemedi: ${error instanceof Error ? error.message : "?"}`, "WARN");
         }
       }
 
-      // ── Ürün Markası ──
       try {
         const matched = await selectUsingSelectorsWithHeuristic(
           page,
-          await expandExistingSelectors(page, [
-            'select[name="a88874"]',
-            'select[name="a88866"]',
-            'select[name^="a888"]',
-          ]),
+          await expandExistingSelectors(page, ['select[name="a88874"]', 'select[name="a88866"]', 'select[name^="a888"]']),
           DEFAULT_PRODUCT_BRAND,
         );
         addLog(logs, `Ürün markası → "${DEFAULT_PRODUCT_BRAND}" (${matched.mode}, ${matched.selector})`, "OK");
@@ -1748,15 +1476,10 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         addLog(logs, `Ürün markası seçilemedi: ${error instanceof Error ? error.message : "?"}`, "WARN");
       }
 
-      // ── Çıkma Yedek Parça ──
       try {
         const matched = await selectUsingSelectorsWithHeuristic(
           page,
-          await expandExistingSelectors(page, [
-            'select[name="a103870"]',
-            'select[name="a103866"]',
-            'select[name^="a1038"]',
-          ]),
+          await expandExistingSelectors(page, ['select[name="a103870"]', 'select[name="a103866"]', 'select[name^="a1038"]']),
           DEFAULT_USED_PART,
         );
         addLog(logs, `Çıkma yedek parça → "${DEFAULT_USED_PART}" (${matched.mode}, ${matched.selector})`, "OK");
@@ -1764,55 +1487,35 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         addLog(logs, `Çıkma yedek parça seçilemedi: ${error instanceof Error ? error.message : "?"}`, "WARN");
       }
 
-      // ── Durum ──
       try {
-        const matched = await selectUsingSelectorsWithHeuristic(
-          page,
-          ['select[name="condition"]'],
-          DEFAULT_CONDITION,
-        );
+        const matched = await selectUsingSelectorsWithHeuristic(page, ['select[name="condition"]'], DEFAULT_CONDITION);
         addLog(logs, `Durum → "${DEFAULT_CONDITION}" (${matched.mode}, ${matched.selector})`, "OK");
       } catch (error) {
         addLog(logs, `Durum seçilemedi: ${error instanceof Error ? error.message : "?"}`, "WARN");
       }
 
-      // ── Takas ──
       try {
-        const matched = await selectUsingSelectorsWithHeuristic(
-          page,
-          ['select[name="exchange"]'],
-          DEFAULT_EXCHANGE,
-        );
+        const matched = await selectUsingSelectorsWithHeuristic(page, ['select[name="exchange"]'], DEFAULT_EXCHANGE);
         addLog(logs, `Takas → "${DEFAULT_EXCHANGE}" (${matched.mode}, ${matched.selector})`, "OK");
       } catch (error) {
         addLog(logs, `Takas seçilemedi: ${error instanceof Error ? error.message : "?"}`, "WARN");
       }
 
-      // ── Marka ──
       try {
         const matched = await selectUsingSelectorsWithHeuristic(
           page,
           await expandExistingSelectors(page, [
-            'select[name="a91512"]',
-            'select[name="a91546"]',
-            'select[name="a91538"]',
-            'select[name^="a9153"]',
-            'select[name^="a9154"]',
+            'select[name="a91512"]', 'select[name="a91546"]', 'select[name="a91538"]',
+            'select[name^="a9153"]', 'select[name^="a9154"]',
           ]),
           listing.brand,
         );
         addLog(logs, `Marka → "${listing.brand}" (${matched.mode}, ${matched.selector})`, "OK");
       } catch {
         try {
-          const selector =
-            (
-              await expandExistingSelectors(page, [
-                'select[name="a91546"]',
-                'select[name="a91538"]',
-                'select[name^="a9153"]',
-                'select[name^="a9154"]',
-              ])
-            )[0] ?? 'select[name="a91546"]';
+          const selector = (await expandExistingSelectors(page, [
+            'select[name="a91546"]', 'select[name="a91538"]', 'select[name^="a9153"]', 'select[name^="a9154"]',
+          ]))[0] ?? 'select[name="a91546"]';
           await selectOptionByHeuristic(page, selector, listing.brand);
           addLog(logs, `Marka → "${listing.brand}" (heuristic fallback, ${selector})`, "OK");
         } catch {
@@ -1827,31 +1530,21 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
 
       await sleep(300);
 
-      // ── Model ──
       try {
         const matched = await selectUsingSelectorsWithHeuristic(
           page,
           await expandExistingSelectors(page, [
-            'select[name="a91534"]',
-            'select[name="a91566"]',
-            'select[name="a91558"]',
-            'select[name^="a9155"]',
-            'select[name^="a9156"]',
+            'select[name="a91534"]', 'select[name="a91566"]', 'select[name="a91558"]',
+            'select[name^="a9155"]', 'select[name^="a9156"]',
           ]),
           listing.model,
         );
         addLog(logs, `Model → "${listing.model}" (${matched.mode}, ${matched.selector})`, "OK");
       } catch {
         try {
-          const selector =
-            (
-              await expandExistingSelectors(page, [
-                'select[name="a91566"]',
-                'select[name="a91558"]',
-                'select[name^="a9155"]',
-                'select[name^="a9156"]',
-              ])
-            )[0] ?? 'select[name="a91566"]';
+          const selector = (await expandExistingSelectors(page, [
+            'select[name="a91566"]', 'select[name="a91558"]', 'select[name^="a9155"]', 'select[name^="a9156"]',
+          ]))[0] ?? 'select[name="a91566"]';
           await selectOptionByHeuristic(page, selector, listing.model);
           addLog(logs, `Model → "${listing.model}" (heuristic fallback, ${selector})`, "OK");
         } catch {
@@ -1864,26 +1557,24 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         }
       }
 
-      // ── İl (City) Seçimi (Eğer seçili değilse İstanbul seç) ──
       try {
         await page.waitForSelector('select[name="city"]', { timeout: 5000 });
         const cityResult = await page.evaluate(() => {
           const sel = document.querySelector('select[name="city"]') as HTMLSelectElement;
-          if (!sel) return { ok: false, label: 'not found' };
-          if (sel.value && sel.value !== '' && sel.value !== '?') return { ok: true, label: sel.options[sel.selectedIndex]?.text, skipped: true };
-          
-          const istanbulOpt = Array.from(sel.options).find(o => o.text.includes("İstanbul"));
+          if (!sel) return { ok: false, label: "not found" };
+          if (sel.value && sel.value !== "" && sel.value !== "?") return { ok: true, label: sel.options[sel.selectedIndex]?.text, skipped: true };
+          const istanbulOpt = Array.from(sel.options).find((o) => o.text.includes("İstanbul"));
           if (istanbulOpt) {
             sel.value = istanbulOpt.value;
-            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            sel.dispatchEvent(new Event("change", { bubbles: true }));
             const angularEl = (window as any).angular?.element?.(sel);
-            if (angularEl?.controller?.('ngModel')) {
-              angularEl.controller('ngModel').$setViewValue(istanbulOpt.value);
+            if (angularEl?.controller?.("ngModel")) {
+              angularEl.controller("ngModel").$setViewValue(istanbulOpt.value);
               angularEl.scope()?.$apply?.();
             }
             return { ok: true, label: istanbulOpt.text, selected: true };
           }
-          return { ok: false, label: 'İstanbul bulunamadı' };
+          return { ok: false, label: "İstanbul bulunamadı" };
         });
         if (cityResult.ok && (cityResult as any).selected) {
           addLog(logs, `İl → "İstanbul" seçildi.`, "OK");
@@ -1892,11 +1583,8 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         addLog(logs, `İl seçimi atlandı veya hata: ${err instanceof Error ? err.message : "?"}`, "DEBUG");
       }
 
-      // ── İlçe Seçimi (Manuel formdan veya rastgele) ──
       try {
         await page.waitForSelector('select[name="town"]', { timeout: 5000 });
-        
-        // İlçelerin dolmasını bekle
         await page.waitForFunction(() => {
           const sel = document.querySelector('select[name="town"]') as HTMLSelectElement;
           return sel && sel.options.length > 1 && !sel.disabled;
@@ -1907,37 +1595,30 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
 
         const townResult = await page.evaluate((target) => {
           const sel = document.querySelector('select[name="town"]') as HTMLSelectElement;
-          if (!sel) return { ok: false, value: '', label: 'select bulunamadı' };
-
-          const options = Array.from(sel.options).filter(o => o.value && o.value !== '' && o.value !== '?');
-          if (options.length === 0) return { ok: false, value: '', label: 'seçenek yok' };
+          if (!sel) return { ok: false, value: "", label: "select bulunamadı" };
+          const options = Array.from(sel.options).filter((o) => o.value && o.value !== "" && o.value !== "?");
+          if (options.length === 0) return { ok: false, value: "", label: "seçenek yok" };
 
           let selectedOpt = null;
-
           if (target) {
-            selectedOpt = options.find(o => o.text.trim().toLowerCase() === target.toLowerCase());
-            if (!selectedOpt) {
-              selectedOpt = options.find(o => o.text.toLowerCase().includes(target.toLowerCase()));
-            }
+            selectedOpt = options.find((o) => o.text.trim().toLowerCase() === target.toLowerCase());
+            if (!selectedOpt) selectedOpt = options.find((o) => o.text.toLowerCase().includes(target.toLowerCase()));
           }
-
           const finalOpt = selectedOpt || options[Math.floor(Math.random() * options.length)];
-          
+
           sel.value = finalOpt.value;
-          sel.dispatchEvent(new Event('change', { bubbles: true }));
-          
-          // Angular ngModel güncelle
+          sel.dispatchEvent(new Event("change", { bubbles: true }));
           const angularEl = (window as any).angular?.element?.(sel);
-          if (angularEl?.controller?.('ngModel')) {
-            angularEl.controller('ngModel').$setViewValue(finalOpt.value);
+          if (angularEl?.controller?.("ngModel")) {
+            angularEl.controller("ngModel").$setViewValue(finalOpt.value);
             angularEl.scope()?.$apply?.();
           }
-          return { 
-            ok: true, 
-            value: finalOpt.value, 
-            label: finalOpt.text, 
-            isManual: !!(target && selectedOpt === options.find(o => o.text.toLowerCase().includes(target.toLowerCase()))),
-            isPriority: !target && !!selectedOpt
+          return {
+            ok: true,
+            value: finalOpt.value,
+            label: finalOpt.text,
+            isManual: !!(target && selectedOpt === options.find((o) => o.text.toLowerCase().includes(target.toLowerCase()))),
+            isPriority: !target && !!selectedOpt,
           };
         }, targetTown);
 
@@ -1945,9 +1626,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
           let source = "(rastgele)";
           if (townResult.isManual) source = "(formdan)";
           else if (townResult.isPriority) source = "(öncelikli)";
-          
           addLog(logs, `İlçe → "${townResult.label}" ${source}`, "OK");
-          // Puppeteer native select de yapalım garanti olsun
           await page.select('select[name="town"]', townResult.value).catch(() => null);
         } else {
           addLog(logs, `İlçe seçilemedi: ${townResult.label}`, "WARN");
@@ -1956,10 +1635,8 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         addLog(logs, `İlçe seçimi hatası: ${err instanceof Error ? err.message : "?"}`, "DEBUG");
       }
 
-      // ── Mahalle Seçimi (rastgele) ──
       try {
         await page.waitForSelector('select[name="quarter"]', { timeout: 5000 });
-        // Mahalle listesinin doldurulmasını bekle
         await page.waitForFunction(() => {
           const sel = document.querySelector('select[name="quarter"]') as HTMLSelectElement;
           return sel && !sel.disabled && sel.options.length > 1;
@@ -1967,18 +1644,15 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
 
         const quarterResult = await page.evaluate(() => {
           const sel = document.querySelector('select[name="quarter"]') as HTMLSelectElement;
-          if (!sel) return { ok: false, value: '', label: 'select bulunamadı' };
-          
-          const options = Array.from(sel.options).filter(o => o.value && o.value !== '' && o.value !== '?');
-          if (options.length === 0) return { ok: false, value: '', label: 'seçenek yok' };
-          
+          if (!sel) return { ok: false, value: "", label: "select bulunamadı" };
+          const options = Array.from(sel.options).filter((o) => o.value && o.value !== "" && o.value !== "?");
+          if (options.length === 0) return { ok: false, value: "", label: "seçenek yok" };
           const randomOpt = options[Math.floor(Math.random() * options.length)];
           sel.value = randomOpt.value;
-          sel.dispatchEvent(new Event('change', { bubbles: true }));
-          
+          sel.dispatchEvent(new Event("change", { bubbles: true }));
           const angularEl = (window as any).angular?.element?.(sel);
-          if (angularEl?.controller?.('ngModel')) {
-            angularEl.controller('ngModel').$setViewValue(randomOpt.value);
+          if (angularEl?.controller?.("ngModel")) {
+            angularEl.controller("ngModel").$setViewValue(randomOpt.value);
             angularEl.scope()?.$apply?.();
           }
           return { ok: true, value: randomOpt.value, label: randomOpt.text };
@@ -1994,7 +1668,6 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         addLog(logs, `Mahalle seçimi hatası: ${err instanceof Error ? err.message : "?"}`, "DEBUG");
       }
 
-      // ──── CHECKBOX'LAR ────
       stepLog(logs, "CHECKBOX'LAR");
 
       try {
@@ -2032,16 +1705,14 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         return { ok: true, mode, logs };
       }
 
-      // ──── FORM DEVAM BUTONU ────
       stepLog(logs, "FORM DEVAM BUTONU");
       addLog(logs, "Devam butonu tıklanıyor...", "INFO");
       await sleep(500);
 
-      // Angular form submit: .add-classified-submit butonunu tıkla
       try {
         await page.evaluate(() => {
           const btn = document.querySelector('.add-classified-submit') as HTMLButtonElement;
-          if (btn) { btn.scrollIntoView({ block: 'center' }); btn.click(); }
+          if (btn) { btn.scrollIntoView({ block: "center" }); btn.click(); }
         });
         addLog(logs, "Form submit butonu tıklandı.", "OK");
       } catch {
@@ -2049,12 +1720,9 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         addLog(logs, `Devam butonuna tıklandı (fallback). Yöntem: ${continueTrigger}`, "OK");
       }
 
-      await page
-        .waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30_000 })
-        .catch(() => null);
+      await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => null);
       addLog(logs, `Form sonrası URL: ${page.url()}`, "INFO");
 
-      // ── Kategori Tahmini Sayfası (otomatik algılama başarısızsa) ──
       if (page.url().includes("kategori-tahmini")) {
         stepLog(logs, "KATEGORİ TAHMİNİ");
         addLog(logs, "Kategori tahmin sayfası — manuel seçim yapılıyor...", "INFO");
@@ -2062,41 +1730,33 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         try {
           await page.waitForSelector('a.post-get-btn-sicily, a.btn-link', { timeout: 10_000 }).catch(() => null);
           const clicked = await page.evaluate(() => {
-            const btns = Array.from(document.querySelectorAll<HTMLElement>('a, button'));
-            const target = btns.find(el =>
-              el.textContent?.replace(/\s+/g, ' ').trim().includes('Başka Bir Kategori Seçmek İstiyorum')
+            const btns = Array.from(document.querySelectorAll<HTMLElement>("a, button"));
+            const target = btns.find((el) =>
+              el.textContent?.replace(/\s+/g, " ").trim().includes("Başka Bir Kategori Seçmek İstiyorum"),
             );
             if (target) { target.click(); return true; }
             return false;
           });
           if (clicked) {
             addLog(logs, "Başka Bir Kategori Seçmek İstiyorum → tıklandı.", "OK");
-            await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => null);
+            await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => null);
             addLog(logs, `Kategori seçim sayfası URL: ${page.url()}`, "INFO");
           } else {
             addLog(logs, "Kategori tahmin butonu bulunamadı!", "WARN");
           }
         } catch (err) {
-          addLog(logs, `Kategori tahmin butonu hatası: ${err instanceof Error ? err.message : '?'}`, "ERROR");
+          addLog(logs, `Kategori tahmin butonu hatası: ${err instanceof Error ? err.message : "?"}`, "ERROR");
         }
       }
 
-      // ── Adım Adım Kategori Seçimi ──
       if (page.url().includes("adim-adim-kategori")) {
         stepLog(logs, "ADIM ADIM KATEGORİ");
         try {
-          const categories = [
-            "Cep Telefonu & Aksesuar",
-            "Cep Telefonu",
-            listing.brand,
-            listing.model,
-          ];
+          const categories = ["Cep Telefonu & Aksesuar", "Cep Telefonu", listing.brand, toCategoryModelLabel(listing.brand, listing.model)];
           for (let ci = 0; ci < categories.length; ci++) {
             const cat = categories[ci];
             await clickCategoryItem(page, cat);
             addLog(logs, `Kategori seçildi: ${cat}`, "OK");
-
-            // Sonraki kategori varsa, onun DOM'da görünmesini bekle
             if (ci < categories.length - 1) {
               const nextCat = categories[ci + 1];
               try {
@@ -2106,7 +1766,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
                     const all = Array.from(document.querySelectorAll<HTMLElement>("li, a, span"));
                     return all.some((el) => normalize(el.textContent ?? "") === normalize(next));
                   },
-                  { timeout: 10000 },
+                  { timeout: 20000 },
                   nextCat,
                 );
               } catch {
@@ -2118,35 +1778,32 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
           addLog(logs, "Kategori seçimi tamamlandı, 'Devam Et' tıklanıyor...", "INFO");
           await sleep(300);
 
-          // ng-hide'ı kaldır, display: block !important ile override et
           await page.evaluate(() => {
-            const el = document.getElementById('sicilyManuel');
+            const el = document.getElementById("sicilyManuel");
             if (el) {
-              el.classList.remove('ng-hide', 'ng-hide-animate');
-              (el as HTMLElement).style.setProperty('display', 'block', 'important');
+              el.classList.remove("ng-hide", "ng-hide-animate");
+              (el as HTMLElement).style.setProperty("display", "block", "important");
             }
           });
           await sleep(500);
 
           let devamClicked = false;
-          // 1. Puppeteer native click (gerçek fare olayı gönderir)
           try {
-            await page.waitForSelector('#sicilyManuel', { timeout: 5000 });
-            await page.click('#sicilyManuel');
+            await page.waitForSelector("#sicilyManuel", { timeout: 5000 });
+            await page.click("#sicilyManuel");
             devamClicked = true;
           } catch {
             addLog(logs, "Native click başarısız, Angular scope deneniyor...", "WARN");
           }
 
-          // 2. Native click başarısızsa Angular scope ile doğrudan tetikle
           if (!devamClicked) {
             devamClicked = await page.evaluate(() => {
-              const el = document.getElementById('sicilyManuel');
+              const el = document.getElementById("sicilyManuel");
               if (el && (window as any).angular) {
                 try {
                   const scope = (window as any).angular.element(el).scope();
-                  if (scope && typeof scope.categorySetSelect === 'function') {
-                    scope.$apply(() => { scope.categorySetSelect('DEFAULT'); });
+                  if (scope && typeof scope.categorySetSelect === "function") {
+                    scope.$apply(() => { scope.categorySetSelect("DEFAULT"); });
                     return true;
                   }
                 } catch {}
@@ -2155,23 +1812,21 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
             });
           }
 
-          // 3. Son çare: text bazlı arama
           if (!devamClicked) {
             devamClicked = await page.evaluate(() => {
-              const normalize = (v: string) => v.replace(/\s+/g, ' ').trim();
-              const links = Array.from(document.querySelectorAll<HTMLElement>('a, button'));
-              // Önce görünür olan
-              const visible = links.find(el =>
-                normalize(el.textContent ?? '') === 'Devam Et' &&
-                !el.classList.contains('ng-hide') &&
-                (el as HTMLElement).offsetParent !== null
+              const normalize = (v: string) => v.replace(/\s+/g, " ").trim();
+              const links = Array.from(document.querySelectorAll<HTMLElement>("a, button"));
+              const visible = links.find(
+                (el) =>
+                  normalize(el.textContent ?? "") === "Devam Et" &&
+                  !el.classList.contains("ng-hide") &&
+                  (el as HTMLElement).offsetParent !== null,
               );
               if (visible) { visible.click(); return true; }
-              // Gizli dahil
-              const anyEl = links.find(el => normalize(el.textContent ?? '') === 'Devam Et');
+              const anyEl = links.find((el) => normalize(el.textContent ?? "") === "Devam Et");
               if (anyEl) {
-                anyEl.classList.remove('ng-hide', 'ng-hide-animate');
-                (anyEl as HTMLElement).style.setProperty('display', 'block', 'important');
+                anyEl.classList.remove("ng-hide", "ng-hide-animate");
+                (anyEl as HTMLElement).style.setProperty("display", "block", "important");
                 anyEl.click();
                 return true;
               }
@@ -2181,40 +1836,36 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
 
           if (devamClicked) {
             addLog(logs, "'Devam Et' tıklandı.", "OK");
-            await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => null);
+            await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => null);
             addLog(logs, `Kategori seçimi sonrası URL: ${page.url()}`, "INFO");
           } else {
             addLog(logs, "'Devam Et' butonu bulunamadı!", "WARN");
           }
         } catch (err) {
-          addLog(logs, `Adım adım kategori hatası: ${err instanceof Error ? err.message : '?'}`, "WARN");
+          const message = err instanceof Error ? err.message : "?";
+          addLog(logs, `Adım adım kategori hatası: ${message}`, "ERROR");
+          await persistDebugScreenshot(page, logs);
+          const totalElapsedCat = ((Date.now() - _publishStartTime) / 1000).toFixed(1);
+          addLog(logs, `━━━ PUBLISH DURDURULDU — kategori seçilemedi (${totalElapsedCat}s) ━━━`, "ERROR");
+          return { ok: false, mode, logs, error: `Kategori seçilemedi: ${message}` };
         }
       }
-
     } else {
       addLog(logs, `ilan-bilgileri sayfası algılanmadı. Mevcut URL: ${page.url()}`, "WARN");
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // ÜRÜN ÖZELLİKLERİ
-    // ═══════════════════════════════════════════════════════════════════
     stepLog(logs, "ÜRÜN ÖZELLİKLERİ");
 
-    // ── Doping Modalı (Varsa Kapat) ──
     try {
       await dismissDopingModal(page, logs);
       await clickDopingContinueButton(page);
-    } catch {
-      // Doping yoksa devam et
-    }
+    } catch {}
 
-    // ── Ürün Özellikleri Formu (Eğer bu adımda geldiyse) ──
     if (page.url().includes("urun-ozellikleri")) {
       try {
         await logVisibleSelects(page, logs);
         await fillAllVisibleSelects(page, logs, listing as unknown as Record<string, unknown>, botSettings);
         await sleep(1500);
-
         addLog(logs, "Final 'Devam' tıklanıyor...", "INFO");
         await clickContinueButton(page);
         await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
@@ -2223,23 +1874,18 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // TESLİMAT TERCİHLERİ
-    // ═══════════════════════════════════════════════════════════════════
     if (page.url().includes("teslimat-tercihleri")) {
       stepLog(logs, "TESLİMAT TERCİHLERİ");
       try {
-        // Loader'ın bitmesini bekle
         await page.waitForFunction(() => {
           const loader = document.querySelector('.loading, .spinner, .loader, [class*="loading"], [class*="spinner"]');
-          const overlay = document.querySelector('.overlay, .modal-backdrop');
+          const overlay = document.querySelector(".overlay, .modal-backdrop");
           return !loader && !overlay;
         }, { timeout: 10000 }).catch(() => null);
 
         await sleep(500);
         addLog(logs, "Teslimat tercihleri 'Devam Et' tıklanıyor...", "INFO");
 
-        // Butonun aktif olmasını bekle
         await page.waitForFunction(() => {
           const btn = document.querySelector('button.add-classified-submit') as HTMLButtonElement;
           return btn && !btn.disabled;
@@ -2250,7 +1896,8 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
           if (btn) btn.click();
         });
 
-        // Navigation'ı bekle — timeout olursa retry
+        await dismissUsageLimitModal(page, logs);
+
         let navigated = false;
         try {
           await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 });
@@ -2261,6 +1908,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
             const btn = document.querySelector('button.add-classified-submit') as HTMLButtonElement;
             if (btn && !btn.disabled) btn.click();
           });
+          await dismissUsageLimitModal(page, logs);
           try {
             await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 });
             navigated = true;
@@ -2277,22 +1925,19 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // ÜRÜN FİYATI
-    // ═══════════════════════════════════════════════════════════════════
     if (page.url().includes("urun-fiyati")) {
       stepLog(logs, "ÜRÜN FİYATI");
       try {
         addLog(logs, "Fiyat alanı dolduruluyor...", "INFO");
         await fillInputValue(page, 'input[name="addClassifiedPrice"]', String(listing.price));
         addLog(logs, `Fiyat → ${listing.price} TL`, "OK");
-        
         await sleep(300);
         addLog(logs, "Fiyat sayfasında 'Devam Et' tıklanıyor...", "INFO");
         await page.evaluate(() => {
           const btn = document.querySelector('button.add-classified-submit') as HTMLButtonElement;
           if (btn) btn.click();
         });
+        await dismissUsageLimitModal(page, logs);
         await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
         addLog(logs, "Fiyat adımı tamamlandı.", "OK");
       } catch (err) {
@@ -2300,9 +1945,6 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // ADIM 3-5: ÖNİZLEME → DOPİNG → TEBRİKLER (döngü ile)
-    // ═══════════════════════════════════════════════════════════════════
     let postFiyatLoop = 0;
     const MAX_POST_FIYAT_LOOP = 15;
     while (postFiyatLoop++ < MAX_POST_FIYAT_LOOP && !page.url().includes("tebrikler")) {
@@ -2311,27 +1953,23 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       if (loopUrl.includes("adim-3")) {
         stepLog(logs, "ÖNİZLEME");
         try {
-          await page.waitForSelector('button.btn', { timeout: 5000 }).catch(() => null);
+          await page.waitForSelector("button.btn", { timeout: 5000 }).catch(() => null);
           await sleep(1000);
           addLog(logs, "Adım-3 onay sayfası 'Devam Et' tıklanıyor...", "INFO");
 
           const clicked = await page.evaluate(() => {
-            const btns = Array.from(document.querySelectorAll('button.btn'));
-            const submitBtn = btns.find(b => b.textContent?.includes("Devam Et") || b.getAttribute('ng-click') === "submitClassified()") as HTMLButtonElement;
-            if (submitBtn) {
-              submitBtn.click();
-              return true;
-            }
+            const btns = Array.from(document.querySelectorAll("button.btn"));
+            const submitBtn = btns.find(
+              (b) => b.textContent?.includes("Devam Et") || b.getAttribute("ng-click") === "submitClassified()",
+            ) as HTMLButtonElement;
+            if (submitBtn) { submitBtn.click(); return true; }
             return false;
           });
 
           if (clicked) {
             await sleep(2000);
             try {
-              await page.waitForFunction(
-                () => !window.location.href.includes("adim-3"),
-                { timeout: 25000 },
-              );
+              await page.waitForFunction(() => !window.location.href.includes("adim-3"), { timeout: 25000 });
             } catch {
               addLog(logs, "Adım-3 → sonraki adım geçişi timeout, URL kontrol ediliyor...", "WARN");
             }
@@ -2367,7 +2005,6 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       await sleep(1000);
     }
 
-    // ── Sonuç Doğrulama ──
     const finalUrl = page.url();
     const totalElapsed = ((Date.now() - _publishStartTime) / 1000).toFixed(1);
 
@@ -2430,4 +2067,3 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
     }
   }
 }
-

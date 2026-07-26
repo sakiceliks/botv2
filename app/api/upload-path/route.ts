@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { uploadToImgbb } from "@/lib/imgbb";
 import { saveFromPath } from "@/lib/storage";
 
 export async function POST(request: Request) {
@@ -11,11 +10,10 @@ export async function POST(request: Request) {
     }
 
     const savedImage = await saveFromPath(imagePath.trim());
-    const { imageUrl } = await uploadToImgbb(savedImage.fullPath);
 
     return NextResponse.json({
       ok: true,
-      imageUrl,
+      imageUrl: savedImage.relativePath,
       imagePath: savedImage.relativePath,
     });
   } catch (error) {
