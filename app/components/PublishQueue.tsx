@@ -428,7 +428,7 @@ function QueueRow({
               style={{ padding: "0.375rem 0.75rem" }}
             >
               <option value="" disabled className="bg-zinc-900 text-zinc-500">Seç</option>
-              {getColorsForModel(item.draft.model).map((color) => (
+              {getColorsForModel(item.draft.brand, item.draft.model).map((color) => (
                 <option key={color} value={color} className="bg-zinc-900">
                   {color}
                 </option>

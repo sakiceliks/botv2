@@ -50,6 +50,21 @@ Ardından [http://localhost:3000](http://localhost:3000) adresini aç.
 6. Önizlemede marka, model, araç tipi ve kategori yolunu kontrol et.
 7. İstersen `Taslak olarak doldur`, istersen `Sahibinden'de yayınla`.
 
+## Mock görsel klasör yapısı
+
+Hızlı / Toplu ilan ekleme görselleri `mock-image/<model-klasörü>/<renk>/` altından alır. Görselin
+bulunduğu renk klasörü ilanın rengini belirler. Model ve renk listesi `lib/manual-data.ts` içindeki
+`BRANDS` ve `MODEL_COLORS` ile tanımlıdır; yeni renk eklenirse klasörü de aynı adla açılmalıdır.
+
+| Model | Klasör | Renk klasörleri |
+| --- | --- | --- |
+| iPhone 18 Pro Max | `iphone-18-pro-max` | `siyah`, `gumus`, `mavi`, `bordo` |
+| iPhone 18 Pro | `iphone-18-pro` | `siyah`, `gumus`, `mavi`, `bordo` |
+| iPhone 17 Pro Max | `iphone-17-pro-max` | `gumus`, `lacivert`, `turuncu` |
+| iPhone 17 Pro | `iphone-17-pro` | `gumus`, `lacivert`, `turuncu` |
+| Xiaomi 17 Pro Max | `xiaomi-17-pro-max` | `siyah`, `beyaz`, `mor`, `yesil` |
+| Xiaomi 17 Pro | `xiaomi-17-pro` | `siyah`, `beyaz`, `mor`, `yesil` |
+
 ## Puppeteer notları
 
 - Tarayıcı görünür çalışır.

@@ -18,10 +18,10 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import {
   BRANDS,
-  SLOGANS,
   TOWNS,
-  DEFAULT_DESCRIPTION,
-  getColorsForModel
+  getColorsForModel,
+  getDefaultDescription,
+  getSlogansForBrand
 } from "@/lib/manual-data";
 import type { ListingDraft } from "@/lib/types";
 import { getPriceRangeForModel } from "@/lib/price-utils";
@@ -35,7 +35,7 @@ interface BulkAddModalProps {
 export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
   const [selectedBrand, setSelectedBrand] = useState(BRANDS[0].name);
   const [selectedModel, setSelectedModel] = useState(BRANDS[0].models[0]);
-  const [selectedSlogan, setSelectedSlogan] = useState(SLOGANS[0]);
+  const [selectedSlogan, setSelectedSlogan] = useState(getSlogansForBrand(BRANDS[0].name)[0]);
   const [selectedColor, setSelectedColor] = useState("");
   const [quickAdding, setQuickAdding] = useState(false);
   const [quickProgress, setQuickProgress] = useState({ current: 0, total: 0 });
@@ -50,7 +50,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
       .then((r) => r.json())
       .then((data: { ok: boolean; settings: BotSettings }) => {
         if (data.ok) {
-          const range = getPriceRangeForModel(data.settings, selectedBrand, selectedModel);
+          const range = getPriceRangeForModel(data.settings.modelPriceRanges, selectedBrand, selectedModel);
           setPriceMin(range.min);
           setPriceMax(range.max);
         }
@@ -65,7 +65,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
       .then((r) => r.json())
       .then((data: { ok: boolean; settings: BotSettings }) => {
         if (data.ok) {
-          const range = getPriceRangeForModel(data.settings, brand, model);
+          const range = getPriceRangeForModel(data.settings.modelPriceRanges, brand, model);
           setPriceMin(range.min);
           setPriceMax(range.max);
         }
@@ -78,11 +78,15 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
     const brand = BRANDS.find((b) => b.name === brandName);
     const firstModel = brand?.models[0] ?? selectedModel;
     if (brand && brand.models.length > 0) setSelectedModel(firstModel);
+    setSelectedColor("");
+    const brandSlogans = getSlogansForBrand(brandName);
+    if (!brandSlogans.includes(selectedSlogan)) setSelectedSlogan(brandSlogans[0]);
     updatePriceRange(brandName, firstModel);
   };
 
   const handleModelChange = (model: string) => {
     setSelectedModel(model);
+    setSelectedColor("");
     updatePriceRange(selectedBrand, model);
   };
 
@@ -132,12 +136,13 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
     try {
       const images = await fetchModelMockImages(selectedBrand, selectedModel);
       if (images.length === 0) {
-        toast.error("Mock görsel bulunamadı!");
+        toast.error(`Mock görsel bulunamadı! (mock-image/${toModelSlug(selectedBrand, selectedModel)}/<renk>/)`);
         setBulkAdding(false);
         return;
       }
 
       const total = 10;
+      const slogans = getSlogansForBrand(selectedBrand);
       setBulkProgress({ current: 0, total });
       const newDrafts: { draft: ListingDraft; preview: string | null }[] = [];
       const uploadedCache = new Map<number, { imageUrl: string; imagePath: string }>();
@@ -156,7 +161,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
           }
         }
 
-        const currentSlogan = SLOGANS[i % SLOGANS.length];
+        const currentSlogan = slogans[i % slogans.length];
         const currentTown = TOWNS[i % TOWNS.length];
 
         const rawPrice = priceMin + Math.floor(Math.random() * (priceMax - priceMin + 1));
@@ -178,7 +183,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
           category: "Cep Telefonu",
           partCategory: selectedModel,
           price,
-          description: DEFAULT_DESCRIPTION,
+          description: getDefaultDescription(selectedBrand),
           color: images[imgIndex]?.color ?? (selectedColor || undefined),
           storage: "256 GB",
           town: currentTown,
@@ -223,12 +228,13 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
       const shuffled = await fetchModelMockImages(selectedBrand, selectedModel);
 
       if (shuffled.length === 0) {
-        toast.error("Mock görsel bulunamadı!");
+        toast.error(`Mock görsel bulunamadı! (mock-image/${toModelSlug(selectedBrand, selectedModel)}/<renk>/)`);
         setQuickAdding(false);
         return;
       }
 
       const total = shuffled.length;
+      const slogans = getSlogansForBrand(selectedBrand);
       setQuickProgress({ current: 0, total });
       const newDrafts: { draft: ListingDraft; preview: string | null }[] = [];
       let successCount = 0;
@@ -241,7 +247,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
           continue;
         }
 
-        const currentSlogan = SLOGANS[i % SLOGANS.length];
+        const currentSlogan = slogans[i % slogans.length];
         const currentTown = TOWNS[i % TOWNS.length];
 
         const rawPrice = priceMin + Math.floor(Math.random() * (priceMax - priceMin + 1));
@@ -263,7 +269,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
           category: "Cep Telefonu",
           partCategory: selectedModel,
           price,
-          description: DEFAULT_DESCRIPTION,
+          description: getDefaultDescription(selectedBrand),
           color: shuffled[i]?.color ?? (selectedColor || undefined),
           storage: "256 GB",
           town: currentTown,
@@ -340,7 +346,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
                 onChange={(e) => setSelectedSlogan(e.target.value)}
                 className={selectBase}
               >
-                {SLOGANS.map(s => (
+                {getSlogansForBrand(selectedBrand).map(s => (
                   <option key={s} value={s} className="bg-zinc-900">{s}</option>
                 ))}
               </select>
@@ -395,7 +401,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
                 className={selectBase}
               >
                 <option value="" className="bg-zinc-900">Seçiniz</option>
-                {getColorsForModel(selectedModel).map(color => (
+                {getColorsForModel(selectedBrand, selectedModel).map(color => (
                   <option key={color} value={color} className="bg-zinc-900">{color}</option>
                 ))}
               </select>

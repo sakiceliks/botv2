@@ -23,11 +23,11 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import {
   BRANDS,
-  SLOGANS,
-  DEFAULT_DESCRIPTION,
   TOWNS,
   STORAGE_CAPACITIES,
   getColorsForModel,
+  getDefaultDescription,
+  getSlogansForBrand,
 } from "@/lib/manual-data";
 import type { ListingDraft } from "@/lib/types";
 import { getPriceRangeForModel } from "@/lib/price-utils";
@@ -46,14 +46,14 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
   const [isValidatingPath, setIsValidatingPath] = useState(false);
   const [selectedBrand, setSelectedBrand] = useState(BRANDS[0].name);
   const [selectedModel, setSelectedModel] = useState(BRANDS[0].models[0]);
-  const [selectedSlogan, setSelectedSlogan] = useState(SLOGANS[1]);
+  const [selectedSlogan, setSelectedSlogan] = useState(getSlogansForBrand(BRANDS[0].name)[1]);
 
   const [selectedTown, setSelectedTown] = useState("");
   const [selectedColor, setSelectedColor] = useState("");
   const [selectedStorage, setSelectedStorage] = useState("256 GB");
   const [selectedPrice, setSelectedPrice] = useState("48000");
 
-  const [description, setDescription] = useState(DEFAULT_DESCRIPTION);
+  const [description, setDescription] = useState(getDefaultDescription(BRANDS[0].name));
   const [isUploading, setIsUploading] = useState(false);
   const [isAddingToQueue, setIsAddingToQueue] = useState(false);
 
@@ -62,7 +62,7 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
       .then((r) => r.json())
       .then((data: { ok: boolean; settings: BotSettings }) => {
         if (data.ok) {
-          const { min, max } = getPriceRangeForModel(data.settings, brand, model);
+          const { min, max } = getPriceRangeForModel(data.settings.modelPriceRanges, brand, model);
           const raw = min + Math.floor(Math.random() * (max - min + 1));
           setSelectedPrice(String(Math.round(raw / 10) * 10));
         }
@@ -115,11 +115,17 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
     const brand = BRANDS.find((b) => b.name === brandName);
     const firstModel = brand?.models[0] ?? selectedModel;
     if (brand && brand.models.length > 0) setSelectedModel(firstModel);
+    setSelectedColor("");
+    const brandSlogans = getSlogansForBrand(brandName);
+    if (!brandSlogans.includes(selectedSlogan)) setSelectedSlogan(brandSlogans[0]);
+    // Açıklama elle değiştirilmediyse yeni markanın varsayılanına geç
+    if (description === getDefaultDescription(selectedBrand)) setDescription(getDefaultDescription(brandName));
     applyPriceFromSettings(brandName, firstModel);
   };
 
   const handleModelChange = (model: string) => {
     setSelectedModel(model);
+    setSelectedColor("");
     applyPriceFromSettings(selectedBrand, model);
   };
 
@@ -143,7 +149,7 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
       category: "Cep Telefonu",
       partCategory: selectedModel,
       price: Number(selectedPrice) || 45000,
-      description: description || DEFAULT_DESCRIPTION,
+      description: description || getDefaultDescription(selectedBrand),
       color: selectedColor || undefined,
       storage: selectedStorage || undefined,
       town: selectedTown || undefined,
@@ -374,7 +380,7 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
                 className={selectBase}
               >
                 <option value="" className="bg-zinc-900">Seçiniz</option>
-                {getColorsForModel(selectedModel).map(color => (
+                {getColorsForModel(selectedBrand, selectedModel).map(color => (
                   <option key={color} value={color} className="bg-zinc-900">{color}</option>
                 ))}
               </select>
@@ -427,7 +433,7 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
               onChange={(e) => setSelectedSlogan(e.target.value)}
               className={selectBase}
             >
-              {SLOGANS.map(slogan => (
+              {getSlogansForBrand(selectedBrand).map(slogan => (
                 <option key={slogan} value={slogan} className="bg-zinc-900">{slogan}</option>
               ))}
             </select>

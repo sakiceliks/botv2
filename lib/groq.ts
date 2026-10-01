@@ -10,7 +10,7 @@ olarak doldurman gerekiyor.
 
 **Marka:**
 - Model adından çıkar (örn. "iPhone" → Apple, "Galaxy" → Samsung, 
-  "Pixel" → Google, "Xperia" → Sony)
+  "Xiaomi"/"Redmi"/"POCO" → Xiaomi, "Pixel" → Google, "Xperia" → Sony)
 
 **Model:**
 - Ekranda "Model Adı" veya "Model Name" alanından al
@@ -38,7 +38,7 @@ olarak doldurman gerekiyor.
 **Renk:**
 - Görselde genellikle bu bilgi bulunmaz.
 - Kullanıcıya sor: "Cihazın rengi nedir?"
-- Seçenekler: Siyah, Beyaz, Altın, Gümüş, Mor, Mavi, Yeşil, Kırmızı
+- Seçenekler: Siyah, Beyaz, Altın, Gümüş, Mor, Mavi, Lacivert, Yeşil, Kırmızı, Bordo, Turuncu
 
 **Kapasite:**
 - "Kapasite" satırından al

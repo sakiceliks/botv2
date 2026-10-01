@@ -55,6 +55,8 @@ export const BRANDS = [
   {
     name: "Apple",
     models: [
+      "18 Pro Max",
+      "18 Pro",
       "17 Pro Max",
       "17 Pro",
       "17",
@@ -83,25 +85,14 @@ export const BRANDS = [
       "Galaxy Z Fold 7",
       "Galaxy Z Flip 7",
     ],
-  },{
-    name: "Xioami",
+  },
+  {
+    name: "Xiaomi",
     models: [
       "17 Pro Max",
       "17 Pro",
-      "17",
-      "16 Pro Max",
-      "16 Pro",
-      "16",
-      "15 Pro Max",
-      "15 Pro",
-      "15 Plus",
-      "15",
-      "14 Pro Max",
-      "14 Pro",
-      "13 Pro Max",
-      "13",
     ],
-  }
+  },
 ];
 
 export const TOWNS = [
@@ -152,12 +143,25 @@ export const COLORS = [
   "Turuncu",
 ];
 
+// Anahtar: "Marka__Model" (modelPriceRanges ile aynı). Her renk, mock-image/<model>/<renk-slug>/ klasörüne karşılık gelir.
 export const MODEL_COLORS: Record<string, string[]> = {
-  "16 Pro Max": ["Bej", "Beyaz", "Gri", "Siyah"],
+  "Apple__18 Pro Max": ["Siyah", "Gümüş", "Mavi", "Bordo"],
+  "Apple__18 Pro": ["Siyah", "Gümüş", "Mavi", "Bordo"],
+  "Apple__17 Pro Max": ["Gümüş", "Lacivert", "Turuncu"],
+  "Apple__17 Pro": ["Gümüş", "Lacivert", "Turuncu"],
+  "Apple__16 Pro Max": ["Bej", "Beyaz", "Gri", "Siyah"],
+  "Xiaomi__17 Pro Max": ["Siyah", "Beyaz", "Mor", "Yeşil"],
+  "Xiaomi__17 Pro": ["Siyah", "Beyaz", "Mor", "Yeşil"],
 };
 
-export function getColorsForModel(model?: string): string[] {
-  return (model ? MODEL_COLORS[model] : undefined) ?? COLORS;
+export function getColorsForModel(brand?: string, model?: string): string[] {
+  return (brand && model ? MODEL_COLORS[`${brand}__${model}`] : undefined) ?? COLORS;
+}
+
+// Apple dışı markalarda iPhone/Apple geçen sloganlar kullanılmaz
+export function getSlogansForBrand(brand?: string): string[] {
+  if (brand === "Apple") return SLOGANS;
+  return SLOGANS.filter((slogan) => !/İPHONE|APPLE/.test(slogan));
 }
 
 export const STORAGE_CAPACITIES = [
@@ -170,3 +174,11 @@ export const STORAGE_CAPACITIES = [
 export const DEFAULT_DESCRIPTION = `Ürün sıfır kapalı kutu. 1 Yıl Apple Garantili
 
 Detayli bilgi için arayınız `;
+
+const GENERIC_DESCRIPTION = `Ürün sıfır kapalı kutu.
+
+Detayli bilgi için arayınız `;
+
+export function getDefaultDescription(brand?: string): string {
+  return brand === "Apple" ? DEFAULT_DESCRIPTION : GENERIC_DESCRIPTION;
+}

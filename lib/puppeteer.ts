@@ -543,9 +543,14 @@ async function logVisibleSelects(page: Page, logs: string[]) {
   }
 }
 
+// sahibinden renk listesinde birebir karşılığı olmayabilecek renkler için yedek seçenekler
+const COLOR_FALLBACKS: Record<string, string[]> = {
+  "Bordo": ["Kırmızı"],
+};
+
 function buildKnownSelectDefaults(s: ReturnType<typeof readSettings>): Record<string, string[]> {
   return {
-    a86470:   [s.defaultColor, "Beyaz", "Gümüş", "Siyah", "Lacivert", "Turuncu", "Mavi", "Sarı", "Kırmızı", "Mor", "Yeşil"],
+    a86470:   [s.defaultColor, "Beyaz", "Gümüş", "Siyah", "Lacivert", "Turuncu", "Mavi", "Bordo", "Sarı", "Kırmızı", "Mor", "Yeşil"],
     a101170:  [s.defaultStorage, "256 GB", "128 GB", "512 GB", "1 TB"],
     a120853:  [s.defaultOrigin, "Yurt dışı", "Yurt içi"],
     a109392:  [s.defaultWarranty, "Distribütör Garantili", "İthalatçı Garantili", "Garantisi Yok"],
@@ -622,9 +627,12 @@ async function fillAllVisibleSelects(
         if (match) { chosen = match; break; }
       }
       if (info.name === "a86470" && listing.color) {
-        const colorNorm = normalize(String(listing.color));
-        const colorMatch = info.options.find((o) => normalize(o).includes(colorNorm) || colorNorm.includes(normalize(o)));
-        if (colorMatch) chosen = colorMatch;
+        const color = String(listing.color);
+        for (const candidate of [color, ...(COLOR_FALLBACKS[color] ?? [])]) {
+          const colorNorm = normalize(candidate);
+          const colorMatch = info.options.find((o) => normalize(o).includes(colorNorm) || colorNorm.includes(normalize(o)));
+          if (colorMatch) { chosen = colorMatch; break; }
+        }
       }
       if (info.name === "a101170" && listing.storage) {
         const storageNorm = normalize(String(listing.storage));
