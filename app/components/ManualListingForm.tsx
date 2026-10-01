@@ -31,6 +31,7 @@ import {
 } from "@/lib/manual-data";
 import type { ListingDraft } from "@/lib/types";
 import { getPriceRangeForModel } from "@/lib/price-utils";
+import { withTitleCode } from "@/lib/title-code";
 import type { BotSettings } from "@/lib/settings";
 
 interface ManualListingFormProps {
@@ -133,7 +134,7 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
     const nameParts = [selectedSlogan, selectedModel];
     if (selectedStorage) nameParts.push(selectedStorage);
     if (selectedColor) nameParts.push(selectedColor);
-    const listingName = nameParts.join(" ").toUpperCase();
+    const listingName = withTitleCode(nameParts.join(" ").toUpperCase());
 
     return {
       _id: `draft_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -443,6 +444,7 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
             Oluşturulacak Başlık: <span className="text-[#11F08E] font-bold">
               {[selectedSlogan, selectedModel, selectedStorage].filter(Boolean).join(" ").toUpperCase()}
             </span>
+            <span className="text-zinc-500"> + benzersiz kod (örn. K7Q2)</span>
           </p>
         </div>
 

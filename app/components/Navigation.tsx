@@ -1,9 +1,9 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { Layers, Plus, MessageSquare, Zap, Sparkles } from "lucide-react";
+import { Layers, Plus, History, Zap, Sparkles } from "lucide-react";
 
-export type NavTab = "queue" | "whatsapp" | "settings";
+export type NavTab = "queue" | "history" | "settings";
 
 interface NavigationProps {
   activeTab: NavTab;
@@ -14,7 +14,7 @@ interface NavigationProps {
 
 const TABS = [
   { key: "queue" as NavTab, label: "Kuyruk", icon: Layers },
-  { key: "whatsapp" as NavTab, label: "WhatsApp", icon: MessageSquare },
+  { key: "history" as NavTab, label: "Geçmiş", icon: History },
   { key: "settings" as NavTab, label: "Ayarlar", icon: Zap },
 ] as const;
 

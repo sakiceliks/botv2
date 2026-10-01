@@ -12,6 +12,7 @@ import {
 } from "@/lib/browser";
 import { COLORS } from "@/lib/manual-data";
 import { readSettings } from "@/lib/settings";
+import { fitTitleToLength } from "@/lib/title-code";
 import type { ListingDraft, PublishMode } from "@/lib/types";
 
 const SELECTOR_TIMEOUT_MS = 5_000;
@@ -547,6 +548,22 @@ async function logVisibleSelects(page: Page, logs: string[]) {
 const COLOR_FALLBACKS: Record<string, string[]> = {
   "Bordo": ["Kırmızı"],
 };
+
+// Tebrikler sayfasında ilan numarasını metinden veya URL'den okur (best-effort)
+async function extractClassifiedId(page: Page): Promise<string | undefined> {
+  try {
+    const fromUrl = new URL(page.url()).searchParams;
+    for (const key of ["classifiedId", "classifiedid", "id"]) {
+      const value = fromUrl.get(key);
+      if (value && /^\d{6,12}$/.test(value)) return value;
+    }
+    const text = await page.evaluate(() => document.body?.innerText ?? "");
+    const match = text.match(/İlan\s*(?:No|Numarası)\s*[:#]?\s*(\d{6,12})/i);
+    return match?.[1];
+  } catch {
+    return undefined;
+  }
+}
 
 function buildKnownSelectDefaults(s: ReturnType<typeof readSettings>): Record<string, string[]> {
   return {
@@ -1157,7 +1174,20 @@ async function clickDopingContinueButton(page: Page) {
   return "text:Devam Et";
 }
 
+export type PublishMeta = {
+  submitted: boolean;      // Son onay (adım-3) tıklandı — ilan yayınlanmış olabilir, tekrar denenmemeli
+  finalUrl?: string;
+  classifiedId?: string;
+  title: string;           // sahibinden'e fiilen yazılan başlık
+};
+
 export async function publishListing(listing: ListingDraft, mode: PublishMode) {
+  const meta: PublishMeta = { submitted: false, title: listing.name };
+  const result = await runPublish(listing, mode, meta);
+  return { ...result, ...meta };
+}
+
+async function runPublish(listing: ListingDraft, mode: PublishMode, meta: PublishMeta) {
   const botSettings = readSettings();
   _speedMultiplier = botSettings.speedMultiplier ?? 1;
 
@@ -1417,7 +1447,15 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
 
       addLog(logs, "Başlık dolduruluyor...", "INFO");
       await fillInputValue(page, 'input[name="addClassifiedTitle"]', listing.name);
-      addLog(logs, `Başlık → "${listing.name}"`, "OK");
+      const titleMaxLength = await page.$eval('input[name="addClassifiedTitle"]', (el) => (el as HTMLInputElement).maxLength).catch(() => -1);
+      let finalTitle = listing.name;
+      if (titleMaxLength > 0 && finalTitle.length > titleMaxLength) {
+        finalTitle = fitTitleToLength(finalTitle, titleMaxLength);
+        await fillInputValue(page, 'input[name="addClassifiedTitle"]', finalTitle);
+        addLog(logs, `Başlık ${listing.name.length} karakter, sınır ${titleMaxLength} — kod korunarak kısaltıldı.`, "WARN");
+      }
+      meta.title = finalTitle;
+      addLog(logs, `Başlık → "${finalTitle}" (${finalTitle.length}${titleMaxLength > 0 ? `/${titleMaxLength}` : ""} karakter)`, "OK");
 
       addLog(logs, "Açıklama dolduruluyor...", "INFO");
       try {
@@ -1975,6 +2013,8 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
           });
 
           if (clicked) {
+            meta.submitted = true;
+            addLog(logs, "Son onay gönderildi — bu noktadan sonra ilan tekrar denenmeyecek.", "INFO");
             await sleep(2000);
             try {
               await page.waitForFunction(() => !window.location.href.includes("adim-3"), { timeout: 25000 });
@@ -2008,12 +2048,20 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       if (page.url().includes("tebrikler")) {
         stepLog(logs, "TEBRİKLER");
         addLog(logs, "İlan başarıyla yayınlandı! Tebrikler sayfası.", "OK");
+        meta.classifiedId = await extractClassifiedId(page);
+        addLog(logs, meta.classifiedId ? `İlan No: ${meta.classifiedId}` : "İlan No sayfadan okunamadı.", meta.classifiedId ? "OK" : "WARN");
       }
 
       await sleep(1000);
     }
 
     const finalUrl = page.url();
+    meta.finalUrl = finalUrl;
+    if (finalUrl.includes("tebrikler") || finalUrl.includes("doping")) meta.submitted = true;
+    if (finalUrl.includes("tebrikler") && !meta.classifiedId) {
+      meta.classifiedId = await extractClassifiedId(page);
+      if (meta.classifiedId) addLog(logs, `İlan No: ${meta.classifiedId}`, "OK");
+    }
     const totalElapsed = ((Date.now() - _publishStartTime) / 1000).toFixed(1);
 
     const isSuccess = finalUrl.includes("tebrikler") || finalUrl.includes("doping");
@@ -2038,6 +2086,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
 
     addLog(logs, `━━━ KRİTİK HATA YAKALANDI ━━━`, "ERROR");
     addLog(logs, `Son URL: ${page.url()}`, "ERROR");
+    meta.finalUrl = page.url();
 
     try {
       const title = await page.title();

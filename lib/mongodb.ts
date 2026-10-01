@@ -24,6 +24,10 @@ async function connectDB() {
 
     cached.promise = mongoose.connect(MONGODB_URI, opts).then((mongoose) => {
       return mongoose;
+    }).catch((error) => {
+      // Başarısız bağlantı önbellekte kalmasın, sonraki çağrı yeniden denesin
+      cached.promise = null;
+      throw error;
     });
   }
   cached.conn = await cached.promise;

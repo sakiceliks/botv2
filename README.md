@@ -14,6 +14,8 @@ Google Lens + Groq + Puppeteer ile araç parçası görselinden sahibinden ilan 
 - Kategori ve araç tipi için deterministic fallback
 - Düşük güvenli alanlar için önizleme ve kullanıcı onayı
 - Puppeteer görünür Chrome ile `draft` ve `publish` modları
+- Silinmeyen yayın logu ve "Yayın Geçmişi" ekranı
+- Mükerrer ilan koruması (benzersiz başlık kodu, tekrar deneme koruması, görsel tekrar uyarısı)
 
 ## Gerekli ortam değişkenleri
 
@@ -28,6 +30,8 @@ PUPPETEER_USER_DATA_DIR=./chrome-profile
 CHROME_EXECUTABLE_PATH=
 FIXED_LISTING_PRICE=1111
 FIXED_LISTING_DESCRIPTION=Parca temiz durumda olup detaylar icin iletisime gecebilirsiniz.
+MONGODB_URI=            # kuyruk ve yayın logu yedeği
+PUBLISH_LOG_DIR=        # opsiyonel, varsayılan data/publish-log
 ```
 
 ## Kurulum
@@ -64,6 +68,24 @@ bulunduğu renk klasörü ilanın rengini belirler. Model ve renk listesi `lib/m
 | iPhone 17 Pro | `iphone-17-pro` | `gumus`, `lacivert`, `turuncu` |
 | Xiaomi 17 Pro Max | `xiaomi-17-pro-max` | `siyah`, `beyaz`, `mor`, `yesil` |
 | Xiaomi 17 Pro | `xiaomi-17-pro` | `siyah`, `beyaz`, `mor`, `yesil` |
+
+## Yayın logu
+
+- Kuyruktan yapılan her yayın denemesi (başarılı ya da hatalı) `data/publish-log/YYYY-MM.jsonl`
+  dosyasına bir satır olarak eklenir ve MongoDB `publishlogs` koleksiyonuna yedeklenir.
+- Kayıtta başlık, marka/model, renk, kapasite, fiyat, ilçe/mahalle, açıklama, görsel yolu ve hash'i,
+  son URL, varsa ilan no, süre, deneme sayısı ve adım adım Puppeteer logları bulunur.
+- Uygulamada silme yoktur; kuyruğu sıfırlamak logları etkilemez. Kayıtlar sol menüdeki
+  **Yayın Geçmişi** ekranından aranabilir, her satırın adım logları açılıp kopyalanabilir.
+
+## Mükerrer ilan koruması
+
+- **Başlık kodu:** Hızlı/Toplu/Manuel eklemede her başlığın sonuna `K7Q2` gibi benzersiz bir kod eklenir.
+  Yayından hemen önce sunucu, kodu olmayan başlığa kod ekler; daha önce yayınlanmış bir başlıkta kodu yeniler.
+- **Tekrar deneme koruması:** Son onay adımı (adım-3) gönderildikten sonra hata olursa ilan tekrar
+  denenmez ve "kontrol et" olarak işaretlenir; aynı kuyruk öğesi ikinci kez yayınlanmaz.
+- **Görsel uyarısı:** sahibinden aynı fotoğrafın ikinci ilanda kullanılmasını da mükerrer sayar.
+  Daha önce yayınlanmış bir görsel kuyrukta ve logda sarı uyarıyla işaretlenir (yayın engellenmez).
 
 ## Puppeteer notları
 

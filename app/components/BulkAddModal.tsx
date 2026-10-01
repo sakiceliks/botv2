@@ -25,6 +25,7 @@ import {
 } from "@/lib/manual-data";
 import type { ListingDraft } from "@/lib/types";
 import { getPriceRangeForModel } from "@/lib/price-utils";
+import { withTitleCode } from "@/lib/title-code";
 import type { BotSettings } from "@/lib/settings";
 
 interface BulkAddModalProps {
@@ -143,6 +144,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
 
       const total = 10;
       const slogans = getSlogansForBrand(selectedBrand);
+      const usedTitles = new Set<string>();
       setBulkProgress({ current: 0, total });
       const newDrafts: { draft: ListingDraft; preview: string | null }[] = [];
       const uploadedCache = new Map<number, { imageUrl: string; imagePath: string }>();
@@ -167,7 +169,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
         const rawPrice = priceMin + Math.floor(Math.random() * (priceMax - priceMin + 1));
         const price = Math.round(rawPrice / 10) * 10;
 
-        const listingName = `${currentSlogan} ${selectedModel} 256 GB`.toUpperCase();
+        const listingName = withTitleCode(`${currentSlogan} ${selectedModel} 256 GB`.toUpperCase(), usedTitles);
 
         const draft: ListingDraft = {
           _id: `bulk_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 5)}`,
@@ -235,6 +237,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
 
       const total = shuffled.length;
       const slogans = getSlogansForBrand(selectedBrand);
+      const usedTitles = new Set<string>();
       setQuickProgress({ current: 0, total });
       const newDrafts: { draft: ListingDraft; preview: string | null }[] = [];
       let successCount = 0;
@@ -253,7 +256,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
         const rawPrice = priceMin + Math.floor(Math.random() * (priceMax - priceMin + 1));
         const price = Math.round(rawPrice / 10) * 10;
 
-        const listingName = `${currentSlogan} ${selectedModel} 256 GB`.toUpperCase();
+        const listingName = withTitleCode(`${currentSlogan} ${selectedModel} 256 GB`.toUpperCase(), usedTitles);
 
         const draft: ListingDraft = {
           _id: `quick_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 5)}`,
@@ -448,6 +451,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
           <div className="space-y-2">
             <p className="text-xs text-zinc-400">
               Oluşturulacak Başlık: <span className="text-[#11F08E] font-bold">{selectedSlogan} {selectedModel} 256 GB</span>
+              <span className="text-zinc-500"> + benzersiz kod (örn. K7Q2)</span>
             </p>
             <p className="text-[10px] text-zinc-500 leading-relaxed italic">
               Fiyat aralığı: <span className="text-white font-bold">{priceMin.toLocaleString("tr-TR")} — {priceMax.toLocaleString("tr-TR")} TL</span>. İlçeler alfabetik sırayla otomatik atanır.

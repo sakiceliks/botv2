@@ -11,7 +11,6 @@ import {
   motion,
 } from "framer-motion";
 import {
-  RotateCcw,
   CheckCircle2,
   AlertCircle,
   X,
@@ -19,7 +18,6 @@ import {
   History,
   Layers,
   Plus,
-  MessageSquare,
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
@@ -33,7 +31,7 @@ import { BulkAddModal } from "./components/BulkAddModal";
 import { PublishQueue } from "./components/PublishQueue";
 import type { QueueItem } from "./components/PublishQueue";
 import { SahibindenAuthStatus } from "./components/SahibindenAuthStatus";
-import { WhatsAppDashboard } from "./components/WhatsAppDashboard";
+import { PublishHistory } from "./components/PublishHistory";
 import { BotSettings } from "./components/BotSettings";
 import MobileNavigation from "./components/Navigation";
 
@@ -46,7 +44,7 @@ export default function Home() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
-  const [activeView, setActiveView] = useState<"queue" | "whatsapp" | "settings">("queue");
+  const [activeView, setActiveView] = useState<"queue" | "history" | "settings">("queue");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const queueAbortRef = useRef(false);
   const queueItemsRef = useRef<QueueItem[]>([]);
@@ -210,6 +208,7 @@ export default function Home() {
 
       let lastError: string | undefined;
       let success = false;
+      let submittedUnconfirmed = false;
 
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         if (queueAbortRef.current) break;
@@ -226,7 +225,9 @@ export default function Home() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               draft: items[i].draft,
-              mode: "publish"
+              mode: "publish",
+              queueId: items[i].id,
+              attempt: attempt + 1,
             }),
           });
 
@@ -234,8 +235,17 @@ export default function Home() {
           const duration = ((Date.now() - startTime) / 1000).toFixed(0) + "s";
           console.log(`[API] 📡 Yanıt alındı (${items[i].draft.name}) [${duration}]:`, data);
 
+          // Sunucu mükerrer koruması için başlığa kod ekleyip/yenileyip yayınlamış olabilir
+          const publishedTitle: string = data.title || items[i].draft.name;
+          if (publishedTitle !== items[i].draft.name) {
+            items[i] = { ...items[i], draft: { ...items[i].draft, name: publishedTitle } };
+            setQueueItems((prev) =>
+              prev.map((it, idx) => (idx === i ? { ...it, draft: { ...it.draft, name: publishedTitle } } : it))
+            );
+          }
+
           if (data.ok) {
-            console.log(`[BOT] ✅ Başarıyla yayınlandı:`, items[i].draft.name);
+            console.log(`[BOT] ✅ Başarıyla yayınlandı:`, publishedTitle);
             setQueueItems((prev) =>
               prev.map((it, idx) => (idx === i ? { ...it, status: "done", duration } : it))
             );
@@ -243,9 +253,17 @@ export default function Home() {
             success = true;
             batchSuccessCount++;
             break;
+          } else if (data.submitted) {
+            // Son onay gönderildi: ilan yayınlanmış olabilir, tekrar denemek mükerrer ilan açar
+            submittedUnconfirmed = true;
+            lastError = data.alreadySubmitted
+              ? data.error
+              : "Son onay adımı geçildi — ilan yayınlanmış olabilir, sahibinden'den kontrol edin (tekrar denenmedi).";
+            console.error(`[BOT] ⚠️ Son onaydan sonra hata (${publishedTitle}):`, data.error);
+            break;
           } else {
             lastError = data.error;
-            console.error(`[BOT] ❌ Yayınlama hatası (${items[i].draft.name}):`, data.error);
+            console.error(`[BOT] ❌ Yayınlama hatası (${publishedTitle}):`, data.error);
           }
         } catch (err) {
           lastError = "Bağlantı hatası";
@@ -263,7 +281,10 @@ export default function Home() {
             errorMsg: lastError || "Bilinmeyen hata",
           } : it))
         );
-        toast.error(`Yayınlama hatası (${maxRetries + 1} deneme)`, { description: lastError });
+        toast.error(
+          submittedUnconfirmed ? "Yayın doğrulanamadı — tekrar denenmedi" : `Yayınlama hatası (${maxRetries + 1} deneme)`,
+          { description: lastError }
+        );
       }
 
       batchProcessed++;
@@ -374,39 +395,18 @@ export default function Home() {
             <span className={cn("text-sm font-bold whitespace-nowrap", sidebarCollapsed && "hidden")}>Yükleme Kuyruğu</span>
           </div>
 
-          <div 
-            onClick={() => setActiveView("whatsapp")}
+          <div
+            onClick={() => setActiveView("history")}
             className={cn(
               "flex items-center rounded-xl cursor-pointer transition-all",
               sidebarCollapsed ? "justify-center py-3 px-0" : "gap-3 px-4 py-3",
-              activeView === "whatsapp" 
-                ? "bg-[#11F08E]/10 text-[#11F08E] border border-[#11F08E]/20" 
+              activeView === "history"
+                ? "bg-[#11F08E]/10 text-[#11F08E] border border-[#11F08E]/20"
                 : "text-zinc-500 hover:text-zinc-300 hover:bg-white/5"
             )}
           >
-            <MessageSquare className="w-4 h-4 flex-shrink-0" />
-            <span className={cn("text-sm font-bold whitespace-nowrap", sidebarCollapsed && "hidden")}>WhatsApp AI Bot</span>
-          </div>
-
-          <div
-            onClick={() => toast.info("Tamamlananlar özelliği yakında kullanıma sunulacak.")}
-            className={cn(
-              "flex items-center rounded-xl text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer group",
-              sidebarCollapsed ? "justify-center py-3 px-0" : "gap-3 px-4 py-3"
-            )}
-          >
             <History className="w-4 h-4 flex-shrink-0" />
-            <span className={cn("text-sm font-bold whitespace-nowrap", sidebarCollapsed && "hidden")}>Tamamlananlar</span>
-          </div>
-          <div
-            onClick={() => toast.info("Log Kayıtları özelliği yakında kullanıma sunulacak.")}
-            className={cn(
-              "flex items-center rounded-xl text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer group",
-              sidebarCollapsed ? "justify-center py-3 px-0" : "gap-3 px-4 py-3"
-            )}
-          >
-            <RotateCcw className="w-4 h-4 flex-shrink-0" />
-            <span className={cn("text-sm font-bold whitespace-nowrap", sidebarCollapsed && "hidden")}>Log Kayıtları</span>
+            <span className={cn("text-sm font-bold whitespace-nowrap", sidebarCollapsed && "hidden")}>Yayın Geçmişi</span>
           </div>
           <div className={cn("mt-8 px-4 py-2 text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2", sidebarCollapsed && "hidden")}>Ayarlar</div>
           <div
@@ -447,7 +447,7 @@ export default function Home() {
               <path d="M9 5l7 7-7 7" />
             </svg>
             <span className="text-xs font-bold text-zinc-100 truncate">
-              {activeView === "queue" ? "Yükleme Kuyruğu" : activeView === "whatsapp" ? "WhatsApp AI Bot" : "Bot Ayarları"}
+              {activeView === "queue" ? "Yükleme Kuyruğu" : activeView === "history" ? "Yayın Geçmişi" : "Bot Ayarları"}
             </span>
           </div>
 
@@ -579,8 +579,8 @@ export default function Home() {
                 </>
               )}
             </>
-          ) : activeView === "whatsapp" ? (
-            <WhatsAppDashboard />
+          ) : activeView === "history" ? (
+            <PublishHistory />
           ) : (
             <BotSettings />
           )}

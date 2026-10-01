@@ -23,6 +23,7 @@ import {
   Layers,
   Plus,
   Sparkles,
+  AlertTriangle,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -40,6 +41,8 @@ export interface QueueItem {
   addedAt: string;
   duration?: string;
 }
+
+type DupeFlags = { titleUsed: boolean; imageUsed: boolean };
 
 interface PublishQueueProps {
   items: QueueItem[];
@@ -98,6 +101,7 @@ function QueueRow({
   onRemove,
   onUpdate,
   onSelect,
+  dupe,
 }: {
   item: QueueItem;
   index: number;
@@ -107,6 +111,7 @@ function QueueRow({
   onRemove: (id: string) => void;
   onUpdate: (id: string, patch: Partial<ListingDraft>) => void;
   onSelect: (e: React.MouseEvent) => void;
+  dupe?: DupeFlags;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState({ ...item.draft });
@@ -390,6 +395,20 @@ function QueueRow({
             {item.draft.brand} {item.draft.model} · {item.draft.storage}
           </p>
         )}
+        {!editing && item.status !== "done" && (dupe?.imageUsed || dupe?.titleUsed) && (
+          <div className="flex flex-wrap gap-1 mt-1">
+            {dupe.imageUsed && (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-400/10 border border-amber-400/25 text-[9px] font-bold text-amber-300">
+                <AlertTriangle className="w-2.5 h-2.5" /> Görsel daha önce yayınlandı
+              </span>
+            )}
+            {dupe.titleUsed && (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-400/10 border border-amber-400/25 text-[9px] font-bold text-amber-300">
+                <AlertTriangle className="w-2.5 h-2.5" /> Başlık kullanılmış — yayında kod yenilenecek
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-none lg:contents lg:gap-0 mt-3 lg:mt-0">
@@ -590,6 +609,36 @@ export function PublishQueue({
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [lastSelectedIndex, setLastSelectedIndex] = useState<number | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [dupeFlags, setDupeFlags] = useState<Record<string, DupeFlags>>({});
+
+  // Bekleyen ilanların başlık/görselini yayın loguna karşı kontrol et (mükerrer uyarısı)
+  const dupeCheckKey = items
+    .filter((it) => it.status !== "done")
+    .map((it) => `${it.id}|${it.draft.name}|${it.draft.imagePath}`)
+    .join("\n");
+  useEffect(() => {
+    if (!dupeCheckKey) return;
+    const timer = setTimeout(() => {
+      const pending = items.filter((it) => it.status !== "done");
+      fetch("/api/publish-log/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: pending.map((it) => ({
+            id: it.id,
+            title: it.draft.name,
+            imagePath: it.draft.imagePath,
+            imageUrl: it.draft.imageUrl,
+          })),
+        }),
+      })
+        .then((r) => r.json())
+        .then((data) => { if (data.ok) setDupeFlags(data.results); })
+        .catch(() => {});
+    }, 800);
+    return () => clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dupeCheckKey]);
 
   const toggleGroup = (key: string) =>
     setCollapsedGroups(prev => {
@@ -931,6 +980,7 @@ export function PublishQueue({
                                   onRemove={onRemove}
                                   onUpdate={onUpdate}
                                   onSelect={(e) => handleRowClick(globalIdx, e)}
+                                  dupe={dupeFlags[item.id]}
                                 />
                               );
                             })}
