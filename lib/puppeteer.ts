@@ -348,7 +348,57 @@ async function persistDebugScreenshot(page: Page, logs: string[]) {
   addLog(logs, `Hata ekrani kaydedildi: ${filePath}`);
 }
 
-async function clickCategoryItem(page: Page, label: string) {
+async function listVisibleCategoryOptions(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const seen = new Set<string>();
+    for (const el of Array.from(document.querySelectorAll<HTMLElement>("li"))) {
+      if (el.offsetParent === null) continue;
+      const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+      if (text && text.length <= 40) seen.add(text);
+    }
+    return Array.from(seen).slice(-60);
+  });
+}
+
+// Verilen etiketlerden sayfada ilk bulunanı tıklar, tıklanan etiketi döndürür.
+async function clickCategoryItem(page: Page, labels: string | string[]): Promise<string> {
+  const targets = Array.isArray(labels) ? labels : [labels];
+  let label: string;
+  try {
+    const handle = await page.waitForFunction(
+      (targetLabels: string[]) => {
+        const normalize = (v: string) => v.replace(/\s+/g, " ").trim().toLowerCase();
+
+        function getOwnText(el: HTMLElement): string {
+          let text = "";
+          for (const node of el.childNodes) {
+            if (node.nodeType === 3) text += node.textContent;
+          }
+          return text.replace(/\s+/g, " ").trim().toLowerCase();
+        }
+
+        const all = Array.from(document.querySelectorAll<HTMLElement>("li, a, span"));
+        return targetLabels.find((targetLabel) => {
+          const target = normalize(targetLabel);
+          return all.some((el) => getOwnText(el) === target || normalize(el.textContent ?? "") === target);
+        }) ?? false;
+      },
+      { timeout: 30_000 },
+      targets,
+    );
+    label = (await handle.jsonValue()) as string;
+  } catch {
+    const options = await listVisibleCategoryOptions(page).catch(() => []);
+    throw new Error(
+      `Kategori bulunamadi: ${targets.join(" / ")}. Sayfadaki secenekler: ${options.join(", ") || "(okunamadi)"}`,
+    );
+  }
+
+  await clickCategoryLabel(page, label);
+  return label;
+}
+
+async function clickCategoryLabel(page: Page, label: string) {
   await page.waitForFunction(
     (targetLabel: string) => {
       const normalize = (v: string) => v.replace(/\s+/g, " ").trim().toLowerCase();
@@ -415,6 +465,19 @@ const CATEGORY_MODEL_PREFIX: Record<string, string> = {
 function toCategoryModelLabel(brand: string, model: string): string {
   const prefix = CATEGORY_MODEL_PREFIX[brand];
   return prefix ? `${prefix} ${model}` : model;
+}
+
+// Sitedeki model etiketi marka adını içerebilir ya da içermeyebilir
+// ("Xiaomi 17 Pro Max" / "17 Pro Max"); ikisini de dene.
+function toCategoryModelCandidates(brand: string, model: string): string[] {
+  const candidates = [toCategoryModelLabel(brand, model)];
+  const brandPrefix = `${brand} `;
+  if (model.toLowerCase().startsWith(brandPrefix.toLowerCase())) {
+    candidates.push(model.slice(brandPrefix.length));
+  } else if (!CATEGORY_MODEL_PREFIX[brand]) {
+    candidates.push(`${brandPrefix}${model}`);
+  }
+  return Array.from(new Set(candidates));
 }
 
 async function typeIntoContentEditable(
@@ -1752,28 +1815,15 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       if (page.url().includes("adim-adim-kategori")) {
         stepLog(logs, "ADIM ADIM KATEGORİ");
         try {
-          const categories = ["Cep Telefonu & Aksesuar", "Cep Telefonu", listing.brand, toCategoryModelLabel(listing.brand, listing.model)];
-          for (let ci = 0; ci < categories.length; ci++) {
-            const cat = categories[ci];
-            await clickCategoryItem(page, cat);
-            addLog(logs, `Kategori seçildi: ${cat}`, "OK");
-            if (ci < categories.length - 1) {
-              const nextCat = categories[ci + 1];
-              try {
-                await page.waitForFunction(
-                  (next: string) => {
-                    const normalize = (v: string) => v.replace(/\s+/g, " ").trim().toLowerCase();
-                    const all = Array.from(document.querySelectorAll<HTMLElement>("li, a, span"));
-                    return all.some((el) => normalize(el.textContent ?? "") === normalize(next));
-                  },
-                  { timeout: 20000 },
-                  nextCat,
-                );
-              } catch {
-                addLog(logs, `Alt kategori "${nextCat}" yüklenemedi, 2s bekleniyor...`, "WARN");
-                await sleep(2000);
-              }
-            }
+          const categories: string[][] = [
+            ["Cep Telefonu & Aksesuar"],
+            ["Cep Telefonu"],
+            [listing.brand],
+            toCategoryModelCandidates(listing.brand, listing.model),
+          ];
+          for (const candidates of categories) {
+            const clickedLabel = await clickCategoryItem(page, candidates);
+            addLog(logs, `Kategori seçildi: ${clickedLabel}`, "OK");
           }
           addLog(logs, "Kategori seçimi tamamlandı, 'Devam Et' tıklanıyor...", "INFO");
           await sleep(300);
