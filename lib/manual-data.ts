@@ -178,6 +178,7 @@ export const COLORS = [
 
 export const MODEL_COLORS: Record<string, string[]> = {
   "16 Pro Max": ["Bej", "Beyaz", "Gri", "Siyah"],
+  "Xiaomi 17 Pro Max": ["Siyah", "Beyaz", "Mor", "Yeşil"],
 };
 
 export function getColorsForModel(model?: string): string[] {
