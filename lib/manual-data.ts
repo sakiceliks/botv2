@@ -128,10 +128,26 @@ export const BRANDS = [
   },
 ];
 
-export const TOWNS = [
+export const ANADOLU_TOWNS = [
   "Adalar",
-  "Arnavutköy",
   "Ataşehir",
+  "Beykoz",
+  "Çekmeköy",
+  "Kadıköy",
+  "Kartal",
+  "Maltepe",
+  "Pendik",
+  "Sancaktepe",
+  "Sultanbeyli",
+  "Şile",
+  "Tuzla",
+  "Ümraniye",
+  "Üsküdar",
+];
+
+// Şimdilik devre dışı: TOWNS'a eklenmediği sürece hiçbir ilan Avrupa yakasına yayınlanmaz.
+export const AVRUPA_TOWNS = [
+  "Arnavutköy",
   "Avcılar",
   "Bağcılar",
   "Bahçelievler",
@@ -139,36 +155,27 @@ export const TOWNS = [
   "Başakşehir",
   "Bayrampaşa",
   "Beşiktaş",
-  "Beykoz",
   "Beylikdüzü",
   "Beyoğlu",
   "Büyükçekmece",
   "Çatalca",
-  "Çekmeköy",
   "Esenler",
-  "Enyurt",
+  "Esenyurt",
   "Eyüpsultan",
   "Fatih",
   "Gaziosmanpaşa",
   "Güngören",
-  "Kadıköy",
   "Kağıthane",
-  "Kartal",
   "Küçükçekmece",
-  "Maltepe",
-  "Pendik",
-  "Sancaktepe",
   "Sarıyer",
   "Silivri",
-  "Sultanbeyli",
   "Sultangazi",
-  "Şile",
   "Şişli",
-  "Tuzla",
-  "Ümraniye",
-  "Üsküdar",
   "Zeytinburnu",
 ];
+
+// İlanların yayınlanabileceği aktif ilçeler. Avrupa'yı tekrar açmak için: [...ANADOLU_TOWNS, ...AVRUPA_TOWNS]
+export const TOWNS = [...ANADOLU_TOWNS];
 
 export const COLORS = [
   "Lacivert",
@@ -192,6 +199,24 @@ export const STORAGE_CAPACITIES = [
   "1 TB",
 ];
 
-export const DEFAULT_DESCRIPTION = `Ürün sıfır kapalı kutu. 1 Yıl Apple Garantili
+export const DEFAULT_DESCRIPTION = `Bizde yok: Kandırmaca, şişirme fiyat
+Bizde var: Dürüst alışveriş, samimi sohbet, bol bol espri
 
-Detayli bilgi için arayınız `;
+
+“Telefon eskiyse dert etme, bizde yenisi cepte!”
+
+Sıfır var ✔️
+İkinci el var ✔️
+Kasa çatlamış, ekran patlamış, o da bizde çözülür
+
+“Abi telefon ne kadar?” diye soranlara güzel fiyatlar,
+“Eskiyi ver, yeniyi al” diyenlere capcanlı cihazlar burada!
+
+Ne satıyoruz?
+Sıfır kutusunda telefonlar
+♻️ Temiz, garantili 2. el cihazlar
+Takas olur, nakit olur, çay da olur ☕
+
+Telefon sende dert olmasın, biz buradayız
+
+– Ekranı Kırık Gönüllere Dokunuyoruz.`;

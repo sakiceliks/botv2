@@ -12,6 +12,22 @@
   "defaultExchangeable": "Evet",
   "defaultTown": "",
   "defaultQuarter": "",
+  "activeTowns": [
+    "Adalar",
+    "Ataşehir",
+    "Beykoz",
+    "Çekmeköy",
+    "Kadıköy",
+    "Kartal",
+    "Maltepe",
+    "Pendik",
+    "Sancaktepe",
+    "Sultanbeyli",
+    "Şile",
+    "Tuzla",
+    "Ümraniye",
+    "Üsküdar"
+  ],
   "priceAdjustPercent": 0,
   "modelPriceRanges": {
     "Apple__16 Pro Max": {
@@ -31,7 +47,7 @@
       "max": 44000
     }
   },
-  "descriptionSuffix": "",
+  "descriptionSuffix": "Bizde yok: Kandırmaca, şişirme fiyat\nBizde var: Dürüst alışveriş, samimi sohbet, bol bol espri\n\n\n“Telefon eskiyse dert etme, bizde yenisi cepte!”\n\nSıfır var ✔️\nİkinci el var ✔️\nKasa çatlamış, ekran patlamış, o da bizde çözülür\n\n“Abi telefon ne kadar?” diye soranlara güzel fiyatlar,\n“Eskiyi ver, yeniyi al” diyenlere capcanlı cihazlar burada!\n\nNe satıyoruz?\nSıfır kutusunda telefonlar\n♻️ Temiz, garantili 2. el cihazlar\nTakas olur, nakit olur, çay da olur ☕\n\nTelefon sende dert olmasın, biz buradayız\n\n– Ekranı Kırık Gönüllere Dokunuyoruz.",
   "skipDopingModal": true,
   "debugScreenshots": true,
   "headless": true,

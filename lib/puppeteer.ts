@@ -10,7 +10,7 @@ import {
   readBrowserSession,
   resolveChromeExecutable,
 } from "@/lib/browser";
-import { COLORS } from "@/lib/manual-data";
+import { COLORS, TOWNS } from "@/lib/manual-data";
 import { readSettings } from "@/lib/settings";
 import type { ListingDraft, PublishMode } from "@/lib/types";
 
@@ -1653,14 +1653,24 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
           return sel && sel.options.length > 1 && !sel.disabled;
         }, { timeout: 10000 }).catch(() => null);
 
-        const targetTown = listing.town;
+        // Sadece aktif ilçelere (TOWNS = Anadolu yakası) yayınla; dışındaki ilçe istenirse rastgele aktif ilçe seçilir.
+        const isAllowedTown = (name?: string) =>
+          !!name && TOWNS.some((t) => t.toLowerCase() === name.trim().toLowerCase());
+        const requestedTown = listing.town;
+        const targetTown = isAllowedTown(requestedTown) ? requestedTown : undefined;
+        if (requestedTown && !targetTown) {
+          addLog(logs, `İlçe "${requestedTown}" aktif ilçeler (Anadolu yakası) dışında, rastgele aktif ilçe seçilecek.`, "WARN");
+        }
         addLog(logs, `Hedef ilçe: "${targetTown || "(boş)"}"`, "DEBUG");
 
-        const townResult = await page.evaluate((target) => {
+        const townResult = await page.evaluate((target, allowed) => {
           const sel = document.querySelector('select[name="town"]') as HTMLSelectElement;
           if (!sel) return { ok: false, value: "", label: "select bulunamadı" };
-          const options = Array.from(sel.options).filter((o) => o.value && o.value !== "" && o.value !== "?");
-          if (options.length === 0) return { ok: false, value: "", label: "seçenek yok" };
+          const allowedSet = new Set(allowed.map((t) => t.toLowerCase()));
+          const options = Array.from(sel.options).filter(
+            (o) => o.value && o.value !== "" && o.value !== "?" && allowedSet.has(o.text.trim().toLowerCase()),
+          );
+          if (options.length === 0) return { ok: false, value: "", label: "Anadolu yakası ilçesi bulunamadı" };
 
           let selectedOpt = null;
           if (target) {
@@ -1683,7 +1693,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
             isManual: !!(target && selectedOpt === options.find((o) => o.text.toLowerCase().includes(target.toLowerCase()))),
             isPriority: !target && !!selectedOpt,
           };
-        }, targetTown);
+        }, targetTown, TOWNS);
 
         if (townResult.ok) {
           let source = "(rastgele)";
