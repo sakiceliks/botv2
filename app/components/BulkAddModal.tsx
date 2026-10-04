@@ -90,11 +90,14 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
   const BRAND_FOLDER_PREFIX: Record<string, string> = {
     "Apple": "iphone",
     "Samsung": "samsung",
+    "Xiaomi": "xiaomi",
   };
 
   const toModelSlug = (brand: string, model: string) => {
     const prefix = BRAND_FOLDER_PREFIX[brand] ?? brand.toLowerCase();
-    return `${prefix} ${model}`.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+    // "Xiaomi 17 Pro Max" gibi marka adını zaten içeren modellerde prefix tekrar eklenmez
+    const name = model.toLowerCase().startsWith(`${prefix} `) ? model : `${prefix} ${model}`;
+    return name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
   };
 
   type MockImage = { filename: string; url: string; color?: string };
