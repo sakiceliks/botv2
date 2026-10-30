@@ -60,6 +60,7 @@ export const BRANDS = [
       "18",
       "Air",
       "Fold",
+      "Duo",
       "17 Pro Max",
       "17 Pro",
       "17",
@@ -186,6 +187,7 @@ export const COLORS = [
 export const MODEL_COLORS: Record<string, string[]> = {
   "16 Pro Max": ["Bej", "Beyaz", "Gri", "Siyah"],
   "Xiaomi 17 Pro Max": ["Siyah", "Beyaz", "Mor", "Yeşil"],
+  "Duo": ["Beyaz", "Lacivert"],
 };
 
 export function getColorsForModel(model?: string): string[] {
