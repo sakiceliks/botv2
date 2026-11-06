@@ -32,12 +32,13 @@ import {
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import type { BotSettings } from "@/lib/settings";
-import { BRANDS, TOWNS } from "@/lib/manual-data";
+import { TOWNS } from "@/lib/manual-data";
+import { useCatalog } from "@/hooks/use-catalog";
 
 // ── Varsayılan değerler (client-side için) ──────────────────────────────────
 const DEFAULT: BotSettings = {
   speedMultiplier: 1,
-  queueDelaySeconds: 5,
+  queueDelaySeconds: 2,
   maxRetries: 2,
   defaultPublishMode: "publish",
   autoStartQueue: false,
@@ -55,7 +56,7 @@ const DEFAULT: BotSettings = {
   descriptionSuffix: "",
   skipDopingModal: true,
   debugScreenshots: true,
-  headless: false,
+  headless: true,
   notifyOnSuccess: true,
   notifyOnError: true,
   telegramBotToken: "",
@@ -260,11 +261,23 @@ function ModelPriceRangesEditor({
   ranges: Record<string, { min: number; max: number }>;
   onChange: (r: Record<string, { min: number; max: number }>) => void;
 }) {
+  const { activeBrands } = useCatalog();
   const [showAdd, setShowAdd] = useState(false);
-  const [addBrand, setAddBrand] = useState(BRANDS[0].name);
-  const [addModel, setAddModel] = useState(BRANDS[0].models[0]);
+  const [addBrand, setAddBrand] = useState("");
+  const [addModel, setAddModel] = useState("");
   const [addMin, setAddMin] = useState(48000);
   const [addMax, setAddMax] = useState(50000);
+
+  // Katalog yüklenince seçimleri doldur
+  useEffect(() => {
+    if (activeBrands.length === 0) return;
+    if (!addBrand || !activeBrands.some((b) => b.name === addBrand)) {
+      const first = activeBrands[0];
+      setAddBrand(first.name);
+      setAddModel(first.models.find((m) => m.active)?.name ?? first.models[0]?.name ?? "");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBrands]);
 
   const inputCls =
     "bg-[#0d1117] border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[#11F08E]/50 transition-colors w-full";
@@ -289,7 +302,7 @@ function ModelPriceRangesEditor({
     setShowAdd(false);
   };
 
-  const availableModels = BRANDS.find((b) => b.name === addBrand)?.models ?? [];
+  const availableModels = (activeBrands.find((b) => b.name === addBrand)?.models ?? []).filter((m) => m.active);
 
   return (
     <div>
@@ -361,12 +374,13 @@ function ModelPriceRangesEditor({
                     value={addBrand}
                     onChange={(e) => {
                       setAddBrand(e.target.value);
-                      const first = BRANDS.find((b) => b.name === e.target.value)?.models[0] ?? "";
+                      const first =
+                        activeBrands.find((b) => b.name === e.target.value)?.models.find((m) => m.active)?.name ?? "";
                       setAddModel(first);
                     }}
                     className={selectCls}
                   >
-                    {BRANDS.map((b) => (
+                    {activeBrands.map((b) => (
                       <option key={b.name} value={b.name} className="bg-zinc-900">{b.name}</option>
                     ))}
                   </select>
@@ -379,7 +393,7 @@ function ModelPriceRangesEditor({
                     className={selectCls}
                   >
                     {availableModels.map((m) => (
-                      <option key={m} value={m} className="bg-zinc-900">{m}</option>
+                      <option key={m.name} value={m.name} className="bg-zinc-900">{m.name}</option>
                     ))}
                   </select>
                 </div>
@@ -431,6 +445,7 @@ export function BotSettings() {
   const [settings, setSettings] = useState<BotSettings>(DEFAULT);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [refreshingMockImages, setRefreshingMockImages] = useState(false);
   const [hasChanges, setHasChanges] = useState(false);
   const [savedSettings, setSavedSettings] = useState<BotSettings>(DEFAULT);
 
@@ -490,6 +505,24 @@ export function BotSettings() {
     if (!window.confirm("Tüm ayarları varsayılan değerlere sıfırlamak istediğine emin misin?")) return;
     setSettings(DEFAULT);
     toast.info("Varsayılan değerlere sıfırlandı — kaydetmeyi unutma");
+  };
+
+  const handleRefreshMockImages = async () => {
+    setRefreshingMockImages(true);
+    try {
+      const res = await fetch("/api/mock-images/refresh", { method: "POST" });
+      const data = await res.json();
+
+      if (data.ok) {
+        toast.success(data.skipped ? "Mock görsel yenileme zaten çalışıyor." : "Mock görseller yenilendi.");
+      } else {
+        toast.error(data.error || "Mock görsel yenileme başarısız oldu.");
+      }
+    } catch {
+      toast.error("Mock görsel yenileme isteği gönderilemedi.");
+    } finally {
+      setRefreshingMockImages(false);
+    }
   };
 
   const speedInfo = SPEED_LABELS[settings.speedMultiplier] ?? SPEED_LABELS[1];
@@ -875,6 +908,38 @@ export function BotSettings() {
               onChange={(v) => patch("notifyOnError", v)}
             />
           </div>
+        </div>
+      </SectionCard>
+
+      {/* ── Mock Görsel Havuzu ── */}
+      <SectionCard
+        icon={RefreshCw}
+        title="Mock Görsel Havuzu"
+        subtitle="images.py betiğini manuel çalıştır"
+        defaultOpen={false}
+      >
+        <div className="sm:col-span-2 flex flex-col gap-3">
+          <p className="text-[11px] leading-relaxed text-zinc-500">
+            Bu buton, mock görsel klasörlerini yeniden oluşturmak için <span className="font-semibold text-zinc-300">mock-image/images.py</span> betiğini çalıştırır.
+          </p>
+          <button
+            type="button"
+            onClick={handleRefreshMockImages}
+            disabled={refreshingMockImages}
+            className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border border-[#11F08E]/30 bg-[#11F08E]/10 text-[#11F08E] text-xs font-bold hover:bg-[#11F08E]/15 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            {refreshingMockImages ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Yenileniyor...
+              </>
+            ) : (
+              <>
+                <RefreshCw className="w-3.5 h-3.5" />
+                Mock Görselleri Yenile
+              </>
+            )}
+          </button>
         </div>
       </SectionCard>
 

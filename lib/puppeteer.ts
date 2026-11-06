@@ -6,12 +6,15 @@ import { mkdir } from "node:fs/promises";
 import puppeteer, { type Browser, type ElementHandle, type Page } from "puppeteer-core";
 
 import {
+  BROWSER_LAUNCH_FLAGS,
   getUserDataDir,
   readBrowserSession,
   resolveChromeExecutable,
 } from "@/lib/browser";
-import { COLORS, TOWNS } from "@/lib/manual-data";
+import { COLORS, TOWNS, withInstallmentEmphasis } from "@/lib/manual-data";
+import { PUBLISH_TIMINGS } from "@/lib/publish-timings";
 import { readSettings } from "@/lib/settings";
+import { fitTitleToLength } from "@/lib/title-code";
 import type { ListingDraft, PublishMode } from "@/lib/types";
 
 const SELECTOR_TIMEOUT_MS = 5_000;
@@ -28,6 +31,7 @@ async function tryConnectToExistingBrowser(logs: string[]) {
       `http://127.0.0.1:${session.port}/json/version`,
       {
         cache: "no-store",
+        signal: AbortSignal.timeout(PUBLISH_TIMINGS.connectTimeoutMs),
       },
     );
 
@@ -70,6 +74,24 @@ const LOG_EMOJI: Record<LogLevel, string> = {
 
 let _stepCounter = 0;
 let _publishStartTime = 0;
+const _stepTimings: { name: string; start: number }[] = [];
+
+// Sunucu kuyruk motoru için kancalar. Modül-global durum yüzünden aynı anda tek yayın
+// çalıştığından kanca da modül düzeyinde tutulur (publishListing başında kurulur, sonunda silinir).
+export type PublishHooks = {
+  /** Her log satırı eklendiğinde (canlı adım logu için). */
+  onLog?: (line: string) => void;
+  /**
+   * Adım-3 "Devam Et" (son onay) tıklanmadan HEMEN ÖNCE beklenir. Motor burada kalıcı bir
+   * "gönderilmek üzere" işareti yazar; süreç bu noktadan sonra ölürse ilan otomatik yeniden
+   * yayınlanmaz. `false` dönerse ya da fırlatırsa son onay VERİLMEZ (yayın hata ile biter):
+   * ör. kuyruk sahipliği başka bir örneğe geçmişse.
+   */
+  onBeforeSubmit?: () => Promise<void | boolean> | void | boolean;
+};
+let _hooks: PublishHooks | null = null;
+
+class PublishVetoError extends Error {}
 
 function addLog(logs: string[], message: string, level: LogLevel = "INFO") {
   const now = new Date();
@@ -80,6 +102,11 @@ function addLog(logs: string[], message: string, level: LogLevel = "INFO") {
   const prefix = `${LOG_EMOJI[level]} [${time}]${elapsed ? ` (${elapsed})` : ""}`;
   const line = `${prefix} ${message}`;
   logs.push(line);
+  try {
+    _hooks?.onLog?.(line);
+  } catch {
+    /* kanca hatası yayını etkilemesin */
+  }
   if (level === "ERROR") {
     console.error(`[NEXTBOT] ${line}`);
   } else if (level === "WARN") {
@@ -91,13 +118,362 @@ function addLog(logs: string[], message: string, level: LogLevel = "INFO") {
 
 function stepLog(logs: string[], stepName: string) {
   _stepCounter++;
+  closeCurrentStep();
+  _stepTimings.push({ name: stepName, start: Date.now() });
   addLog(logs, `━━━ ADIM ${_stepCounter}: ${stepName} ━━━`, "STEP");
   return _stepCounter;
+}
+
+function closeCurrentStep() {
+  const current = _stepTimings[_stepTimings.length - 1];
+  if (current && !("end" in current)) {
+    (current as { name: string; start: number; end?: number }).end = Date.now();
+  }
+}
+
+// En yavaş adımları raporlar — optimizasyonun nerede kaldığını görmek için.
+function logStepReport(logs: string[]) {
+  closeCurrentStep();
+  const done = _stepTimings
+    .filter((s) => (s as { end?: number }).end)
+    .map((s) => ({
+      name: s.name,
+      seconds: (((s as { end?: number }).end as number) - s.start) / 1000,
+    }))
+    .sort((a, b) => b.seconds - a.seconds)
+    .slice(0, 5);
+  if (done.length === 0) return;
+  addLog(logs, "⏱ Adım süreleri (en yavaş 5):", "STEP");
+  for (const item of done) {
+    addLog(logs, `   ${item.seconds.toFixed(1)}s — ${item.name}`, "STEP");
+  }
 }
 
 let _speedMultiplier = 1;
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, Math.round(ms * _speedMultiplier)));
+}
+
+// ── Hızlı bekleme yardımcıları ──────────────────────────────────────────────
+// Kör sleep() yerine koşul bazlı bekleme: koşul sağlanınca anında döner,
+// süre dolarsa false döner (exception fırlatmaz).
+
+async function waitUntil(
+  page: Page,
+  fn: () => boolean,
+  timeoutMs: number,
+  pollMs: number = PUBLISH_TIMINGS.urlLoopPollMs,
+): Promise<boolean> {
+  try {
+    await (page as any).waitForFunction(fn, { timeout: timeoutMs, polling: pollMs });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitUntilArg<A>(
+  page: Page,
+  fn: (arg: A) => boolean,
+  arg: A,
+  timeoutMs: number,
+  pollMs: number = PUBLISH_TIMINGS.urlLoopPollMs,
+): Promise<boolean> {
+  try {
+    await (page as any).waitForFunction(fn, { timeout: timeoutMs, polling: pollMs }, arg);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Anlık DOM kontrolü — waitForFunction'ın süre maliyeti olmadan ~20ms'de döner.
+function hasEl(page: Page, fn: () => boolean): Promise<boolean> {
+  return page.evaluate(fn).catch(() => false);
+}
+
+async function hasElArg<A>(page: Page, fn: (arg: A) => boolean, arg: A): Promise<boolean> {
+  try {
+    return Boolean(await (page as any).evaluate(fn, arg));
+  } catch {
+    return false;
+  }
+}
+
+// "Artık görünme/kayıp" bekleme — Node tarafında poll yapar; fn tarayıcıda
+// evaluate edilirken KENDİ gövdesiyle gönderildiği için modül bağımlılığı olmamalı.
+async function waitUntilGone(
+  page: Page,
+  fn: () => boolean,
+  timeoutMs: number,
+  pollMs: number = 100,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const stillThere = await page.evaluate(fn).catch(() => false);
+    if (!stillThere) return true;
+    await sleep(pollMs);
+  }
+  return false;
+}
+
+// URL bekleme: waitForNavigation yerine kullanılır.
+// - "excludes": navigasyon gerçekleştiğinde ERKEN döner (timeout tamamı beklemez)
+// - "includes": hedef segment göründüğünde döner
+async function waitForUrl(
+  page: Page,
+  fragment: string,
+  mode: "includes" | "excludes",
+  timeoutMs: number,
+): Promise<boolean> {
+  return waitUntilArg(
+    page,
+    (f: { fragment: string; mode: string }) =>
+      f.mode === "includes"
+        ? window.location.href.includes(f.fragment)
+        : !window.location.href.includes(f.fragment),
+    { fragment, mode },
+    timeoutMs,
+  );
+}
+
+// Sayfa DOM'unun hazır olmasını bekler (genelde anında döner).
+function waitForDomReady(page: Page, timeoutMs = 3_000): Promise<boolean> {
+  return waitUntil(page, () => document.readyState !== "loading", timeoutMs);
+}
+
+// URL'in önceki değerinden farklılaşmasını bekler (waitForNavigation yerine).
+async function waitForUrlChangeFrom(
+  page: Page,
+  previousUrl: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  return waitUntilArg(
+    page,
+    (a: { url: string }) => window.location.href !== a.url,
+    { url: previousUrl },
+    timeoutMs,
+    150,
+  );
+}
+
+// Yüklenen fotoğraf sayısının artmasını bekler (kör sleep(3000) yerine).
+// countUploadedPhotos tarayıcıda çalışır; poll aralığında evaluate ile okunur.
+async function waitForPhotoIncrease(
+  page: Page,
+  beforeCount: number,
+  timeoutMs: number,
+  pollMs: number = PUBLISH_TIMINGS.uploadPollMs,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const count = await page.evaluate(countUploadedPhotos).catch(() => 0);
+    if (count > beforeCount) return true;
+    await sleep(pollMs);
+  }
+  return false;
+}
+
+// Tarayıcı bağlamında çalışır: fotoğraf listesinde yükleme hâlâ sürüyor mu?
+// (progress bar / spinner / yarım yüklenmiş thumbnail). Modül kapsamına
+// dokunmaz — page.evaluate ile serileştirilir.
+function photoUploadInProgress(): boolean {
+  const photoArea = document.querySelector(
+    ".classified-photo-list, .photo-list, .upload-photo-list, [class*='photo-list'], [class*='upload-area'], [class*='photo-list']"
+  ) as HTMLElement | null;
+  if (!photoArea) return false;
+
+  const busy = photoArea.querySelectorAll(
+    '[class*="progress"], [class*="uploading"], [class*="spinner"], [class*="loading"], [aria-busy="true"]'
+  );
+  for (const el of Array.from(busy)) {
+    if ((el as HTMLElement).offsetParent !== null) return true;
+  }
+
+  const imgs = photoArea.querySelectorAll("img");
+  for (const img of Array.from(imgs)) {
+    const el = img as HTMLImageElement;
+    if (el.offsetParent === null) continue;
+    if (!el.complete) return true;
+    const src = (el.currentSrc || el.src || "").trim();
+    if (!src) return true;
+  }
+  return false;
+}
+
+// Yükleme tamamlanana kadar bekle: 1) sayım artsın 2) yükleme göstergesi
+// bitsin 3) sayım kararlılaşsın. Hiçbir faz tamamlanmazsa false (exception yok).
+async function waitForPhotoUploadComplete(
+  page: Page,
+  beforeCount: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  const poll = PUBLISH_TIMINGS.photoStablePollMs;
+  const deadline = Date.now() + timeoutMs;
+
+  // Faz 1 — yeni thumbnail DOM'a düşmeli
+  if (!(await waitForPhotoIncrease(page, beforeCount, Math.max(0, deadline - Date.now()), poll))) {
+    return false;
+  }
+
+  // Faz 2 — yükleme göstergesi (progress/spinner/yarım görsel) kaybolmalı
+  let idle = false;
+  while (Date.now() < deadline) {
+    idle = !(await page.evaluate(photoUploadInProgress).catch(() => false));
+    if (idle) break;
+    await sleep(poll);
+  }
+  if (!idle) return false;
+
+  // Faz 3 — sayım bir süre sabit kalmalı (yeniden yükleme / sıralama dalgalanması)
+  let last = await page.evaluate(countUploadedPhotos).catch(() => beforeCount);
+  let lastChange = Date.now();
+  while (Date.now() < deadline && Date.now() - lastChange < PUBLISH_TIMINGS.photoStableMs) {
+    await sleep(poll);
+    const count = await page.evaluate(countUploadedPhotos).catch(() => last);
+    if (count !== last) {
+      last = count;
+      lastChange = Date.now();
+    }
+  }
+  return last > beforeCount;
+}
+
+// Tarayıcı bağlamında çalışır: "Devam" butonu tıklanabilir mi?
+function continueButtonReady(): boolean {
+  const visible = (el: Element) => {
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  const primary = document.querySelector<HTMLButtonElement>("button.add-classified-submit");
+  if (
+    primary &&
+    !primary.disabled &&
+    primary.getAttribute("aria-busy") !== "true" &&
+    visible(primary)
+  ) {
+    return true;
+  }
+  const byText = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((b) => {
+    const text = b.innerText.replace(/\s+/g, " ").trim().toLocaleLowerCase("tr-TR");
+    return text === "devam" || text === "devam et";
+  });
+  return !!byText && !byText.disabled && byText.getAttribute("aria-busy") !== "true" && visible(byText);
+}
+
+async function waitForContinueButtonReady(
+  page: Page,
+  timeoutMs: number = PUBLISH_TIMINGS.continueReadyTimeoutMs,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await page.evaluate(continueButtonReady).catch(() => false)) return true;
+    await sleep(PUBLISH_TIMINGS.photoStablePollMs);
+  }
+  return false;
+}
+
+// "Devam" tıkla → navigasyonu bekle → olmazsa kısa beklemeyle tekrar dene.
+// true: URL değişti, false: tüm denemelerde navigasyon sağlanamadı.
+async function clickContinueAndWait(opts: {
+  page: Page;
+  label: string;
+  logs: string[];
+  timeoutMs: number;
+  retries?: number;
+  readyTimeoutMs?: number;
+}): Promise<boolean> {
+  const { page, label, logs, timeoutMs } = opts;
+  const retries = opts.retries ?? PUBLISH_TIMINGS.continueRetryCount;
+  const readyTimeoutMs = opts.readyTimeoutMs ?? PUBLISH_TIMINGS.continueReadyTimeoutMs;
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const ready = await waitForContinueButtonReady(page, readyTimeoutMs);
+    if (!ready) {
+      addLog(logs, `${label}: Devam butonu hazır görünmüyor (deneme ${attempt}/${retries}).`, "WARN");
+    }
+
+    const beforeUrl = page.url();
+    let method = "";
+    try {
+      method = await clickContinueButton(page);
+    } catch (err) {
+      addLog(
+        logs,
+        `${label}: Devam butonu tıklanamadı — ${err instanceof Error ? err.message : "?"} (deneme ${attempt}/${retries})`,
+        "WARN",
+      );
+      await sleep(PUBLISH_TIMINGS.continueRetryDelayMs);
+      continue;
+    }
+    addLog(logs, `${label}: Devam tıklandı (${method}) — deneme ${attempt}/${retries}`, "INFO");
+
+    const navigated = await waitForUrlChangeFrom(page, beforeUrl, timeoutMs);
+    if (navigated) {
+      await waitForDomReady(page);
+      addLog(logs, `${label}: navigasyon tamam → ${page.url()}`, "OK");
+      return true;
+    }
+
+    addLog(logs, `${label}: navigasyon olmadı (deneme ${attempt}/${retries})`, "WARN");
+    if (attempt < retries) await sleep(PUBLISH_TIMINGS.continueRetryDelayMs);
+  }
+  return false;
+}
+
+// Tarayıcı bağlamında çalışır: ürün özellikleri select'leri opsiyon dolu mu?
+function productSelectsReady(): boolean {
+  const isPlaceholder = (text: string) => {
+    const t = text.replace(/\s+/g, " ").trim().toLocaleLowerCase("tr-TR");
+    return !t || t === "seçiniz" || t === "secenekler" || t === "seçenekler";
+  };
+  const knownAttributeIds = ["a86470", "a101170", "a120853", "a109392", "a119153"];
+
+  const selects = Array.from(document.querySelectorAll<HTMLSelectElement>("select"));
+  for (const select of selects) {
+    if (select.offsetParent === null) continue;
+    const realOptions = Array.from(select.options).filter(
+      (o) => !isPlaceholder(o.textContent ?? ""),
+    );
+    if (knownAttributeIds.includes(select.id) && realOptions.length > 0) return true;
+    if (realOptions.length >= 3) return true;
+  }
+  return false;
+}
+
+// Select'lerin asenkron yüklenmesini bekle (hazır olmazsa false — akış devam eder).
+async function waitForProductSelectsReady(page: Page, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await page.evaluate(productSelectsReady).catch(() => false)) return true;
+    await sleep(PUBLISH_TIMINGS.photoStablePollMs);
+  }
+  return false;
+}
+
+
+// Submit tıklaması sonrası: navigasyonu veya ortaya çıkan uyarı modalını izler.
+// Modal çıkarsa kapatıp navigasyonu izlemeye devam eder (eski kodda modal
+// kontrolü ayrı bir 4sn'lik waitForFunction ile yapılıyordu).
+async function waitAfterSubmit(
+  page: Page,
+  previousUrl: string,
+  logs: string[],
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const href = await page.evaluate(() => window.location.href).catch(() => "");
+    if (href && href !== previousUrl) return true;
+
+    const modalUp = await page.evaluate(usageLimitModalVisible).catch(() => false);
+    if (modalUp) {
+      await dismissUsageLimitModal(page, logs, 0);
+    }
+
+    await sleep(PUBLISH_TIMINGS.urlLoopPollMs);
+  }
+  return false;
 }
 
 async function withRetry<T>(
@@ -268,6 +644,64 @@ async function injectImageViaBase64(
   );
 }
 
+// Tarayıcı bağlamında çalışır (puppeteer evaluate/waitForFunction ile serileştirilir).
+// Sayfadaki yüklenmiş fotoğraf sayısını döndürür.
+function countUploadedPhotos(): number {
+  const selectors = [
+    ".classified-photo-list li",
+    ".photo-list li",
+    ".upload-photo-list li",
+    '[class*="photo-list"] li',
+    '[class*="photo"] li.photo-item',
+    ".image-list li",
+    ".photos li",
+  ];
+  for (const sel of selectors) {
+    const count = document.querySelectorAll(sel).length;
+    if (count > 0) return count;
+  }
+  const anyImg = document.querySelectorAll(
+    '.classified-photo-list li, [class*="photo"] li, [class*="image"] li, .upload-area img',
+  );
+  return anyImg.length;
+}
+
+// ── Muhafazakâr istek engeli ────────────────────────────────────────────────
+// Yalnızca media/font ve bilinen tracker/ad host'ları engellenir.
+// CSS/görsel/script ASLA engellenmez: layout kontrolleri (offsetParent /
+// boundingBox), fotoğraf yükleme doğrulaması ve debug screenshot'lar bozulmasın.
+const BLOCKED_RESOURCE_TYPES = new Set(["media", "font"]);
+const BLOCKED_HOST_PATTERN =
+  /(google-analytics\.com|googletagmanager\.com|doubleclick\.net|googlesyndication\.com|adservice\.|facebook\.net|fbcdn\.net|hotjar\.com|criteo\.(com|net)|scorecardresearch\.com|adnxs\.com|rubiconproject\.com|pubmatic\.com|openx\.net|taboola\.com|outbrain\.com|yieldmo\.com)/i;
+
+async function installResourceGuard(page: Page, logs: string[]) {
+  try {
+    await page.setRequestInterception(true);
+  } catch (error) {
+    addLog(
+      logs,
+      `İstek engeli etkinleştirilemedi: ${error instanceof Error ? error.message : "?"}`,
+      "WARN",
+    );
+    return;
+  }
+
+  page.on("request", (request) => {
+    try {
+      const blocked =
+        BLOCKED_RESOURCE_TYPES.has(request.resourceType()) ||
+        BLOCKED_HOST_PATTERN.test(request.url());
+      (blocked ? request.abort() : request.continue()).catch(() => {});
+    } catch {
+      try {
+        request.continue().catch(() => {});
+      } catch {}
+    }
+  });
+
+  addLog(logs, "Muhafazakâr istek engeli kuruldu (media/font + tracker).", "DEBUG");
+}
+
 function attachDebugLogging(browser: Browser, page: Page, logs: string[]) {
   browser.on("disconnected", () => {
     addLog(logs, "Browser disconnected event tetiklendi.");
@@ -306,9 +740,12 @@ function attachDebugLogging(browser: Browser, page: Page, logs: string[]) {
       failure: () => { errorText: string } | null;
     }) => {
       const failure = request.failure();
+      const errorText = failure?.errorText ?? "unknown";
+      // İstek engeli/iptal kaynaklı hatalar spam'dir — publish akışını ilgilendirmez.
+      if (errorText.includes("ERR_ABORTED")) return;
       addLog(
         logs,
-        `Request failed: ${request.method()} ${request.url()} -> ${failure?.errorText ?? "unknown"}`,
+        `Request failed: ${request.method()} ${request.url()} -> ${errorText}`,
       );
     },
   );
@@ -383,7 +820,7 @@ async function clickCategoryItem(page: Page, labels: string | string[]): Promise
           return all.some((el) => getOwnText(el) === target || normalize(el.textContent ?? "") === target);
         }) ?? false;
       },
-      { timeout: 30_000 },
+      { timeout: PUBLISH_TIMINGS.categoryLabelTimeoutMs },
       targets,
     );
     label = (await handle.jsonValue()) as string;
@@ -419,7 +856,7 @@ async function clickCategoryLabel(page: Page, label: string) {
         return own === target || full === target;
       });
     },
-    { timeout: 30_000 },
+    { timeout: PUBLISH_TIMINGS.categoryLabelTimeoutMs },
     label,
   );
 
@@ -606,13 +1043,37 @@ async function logVisibleSelects(page: Page, logs: string[]) {
   }
 }
 
-function buildKnownSelectDefaults(s: ReturnType<typeof readSettings>): Record<string, string[]> {
+// sahibinden renk listesinde birebir karşılığı olmayabilecek renkler için yedek seçenekler
+const COLOR_FALLBACKS: Record<string, string[]> = {
+  "Bordo": ["Kırmızı"],
+};
+
+// Tebrikler sayfasında ilan numarasını metinden veya URL'den okur (best-effort)
+async function extractClassifiedId(page: Page): Promise<string | undefined> {
+  try {
+    const fromUrl = new URL(page.url()).searchParams;
+    for (const key of ["classifiedId", "classifiedid", "id"]) {
+      const value = fromUrl.get(key);
+      if (value && /^\d{6,12}$/.test(value)) return value;
+    }
+    const text = await page.evaluate(() => document.body?.innerText ?? "");
+    const match = text.match(/İlan\s*(?:No|Numarası)\s*[:#]?\s*(\d{6,12})/i);
+    return match?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
+function buildKnownSelectDefaults(
+  s: ReturnType<typeof readSettings>,
+  selectedCondition = s.defaultCondition,
+): Record<string, string[]> {
   return {
-    a86470:   [s.defaultColor, "Beyaz", "Gümüş", "Siyah", "Lacivert", "Turuncu", "Mavi", "Sarı", "Kırmızı", "Mor", "Yeşil"],
+    a86470:   [s.defaultColor, "Beyaz", "Gümüş", "Siyah", "Lacivert", "Turuncu", "Mavi", "Bordo", "Sarı", "Kırmızı", "Mor", "Yeşil"],
     a101170:  [s.defaultStorage, "256 GB", "128 GB", "512 GB", "1 TB"],
     a120853:  [s.defaultOrigin, "Yurt dışı", "Yurt içi"],
     a109392:  [s.defaultWarranty, "Distribütör Garantili", "İthalatçı Garantili", "Garantisi Yok"],
-    a119153:  [s.defaultCondition, "Sıfır", "İkinci El"],
+    a119153:  [selectedCondition, s.defaultCondition, "Sıfır", "İkinci El"],
     exchange: [s.defaultExchangeable, "Evet", "Hayır"],
   };
 }
@@ -660,7 +1121,10 @@ async function fillAllVisibleSelects(
 
   addLog(logs, `Sayfada ${selectInfos.length} doldurulabilir select bulundu.`, "INFO");
 
-  const knownSelectMap = buildKnownSelectDefaults(botSettings ?? readSettings());
+  const knownSelectMap = buildKnownSelectDefaults(
+    botSettings ?? readSettings(),
+    String(listing.condition ?? "").trim() || undefined,
+  );
 
   for (const info of selectInfos) {
     if (SKIP_NAMES.has(info.name)) continue;
@@ -670,7 +1134,13 @@ async function fillAllVisibleSelects(
     ).catch(() => "");
 
     const currentNorm = normalize(currentVal);
-    if (currentNorm && currentNorm !== "seçiniz" && currentNorm !== "secenekler") {
+    const hasListingCondition = info.name === "a119153" && Boolean(String(listing.condition ?? "").trim());
+    if (
+      currentNorm &&
+      currentNorm !== "seçiniz" &&
+      currentNorm !== "secenekler" &&
+      !hasListingCondition
+    ) {
       addLog(logs, `Select "${info.name || info.label}" zaten seçili: "${currentVal}" — atlanıyor.`, "OK");
       continue;
     }
@@ -685,9 +1155,12 @@ async function fillAllVisibleSelects(
         if (match) { chosen = match; break; }
       }
       if (info.name === "a86470" && listing.color) {
-        const colorNorm = normalize(String(listing.color));
-        const colorMatch = info.options.find((o) => normalize(o).includes(colorNorm) || colorNorm.includes(normalize(o)));
-        if (colorMatch) chosen = colorMatch;
+        const color = String(listing.color);
+        for (const candidate of [color, ...(COLOR_FALLBACKS[color] ?? [])]) {
+          const colorNorm = normalize(candidate);
+          const colorMatch = info.options.find((o) => normalize(o).includes(colorNorm) || colorNorm.includes(normalize(o)));
+          if (colorMatch) { chosen = colorMatch; break; }
+        }
       }
       if (info.name === "a101170" && listing.storage) {
         const storageNorm = normalize(String(listing.storage));
@@ -711,7 +1184,7 @@ async function fillAllVisibleSelects(
     try {
       await selectByText(page, info.selector, chosen);
       addLog(logs, `Select "${info.name || info.label}" → "${chosen}"`, "OK");
-      await sleep(400);
+      await sleep(PUBLISH_TIMINGS.selectSettleMs);
     } catch {
       addLog(logs, `Select "${info.name || info.label}" doldurulamadı.`, "WARN");
     }
@@ -979,30 +1452,64 @@ async function clickContinueButton(page: Page) {
   throw new Error("Devam butonu bulunamadi veya tetiklenemedi.");
 }
 
-async function dismissDraftResumeModal(page: Page, logs: string[]) {
-  const foundModal = await page
-    .waitForFunction(
-      () => {
-        const buttons = Array.from(document.querySelectorAll("button"));
-        return buttons.some(
-          (button) =>
-            button.innerText.replace(/\s+/g, " ").trim() === "Hayır, Yeni Bir İlan Vermek İstiyorum",
-        );
-      },
-      { timeout: 10_000 },
-    )
-    .then(() => true)
-    .catch(() => false);
+const DRAFT_RESUME_BUTTON = "Hayır, Yeni Bir İlan Vermek İstiyorum";
+
+// Tarayıcı bağlamında çalışır. ⚠️ Modül kapsamına (DRAFT_RESUME_BUTTON vb.)
+// referans VEREMEZ: puppeteer fonksiyonu kaynak olarak tarayıcıya gönderir,
+// dış değişkenler orada tanımsız kalır ve predicate sessizce hep false döner.
+// Bu yüzden buton metni ve istenen durum argümanla iletilir.
+function draftModalStateImpl(a: {
+  text: string;
+  mode: "visible" | "absent" | "visibleOrInput" | "visibleOrNoInput";
+}): boolean {
+  const visible = Array.from(document.querySelectorAll("button")).some(
+    (b) => b.innerText.replace(/\s+/g, " ").trim() === a.text,
+  );
+  if (a.mode === "visible") return visible;
+  if (a.mode === "absent") return !visible;
+  if (a.mode === "visibleOrInput") return visible || !!document.querySelector("#uploadImageField");
+  return visible || !document.querySelector("#uploadImageField");
+}
+
+const draftModalArg = (mode: "visible" | "absent" | "visibleOrInput" | "visibleOrNoInput") => ({
+  text: DRAFT_RESUME_BUTTON,
+  mode,
+});
+
+// Modal yoksa 10sn beklemek yerine: modal ya da yükleme input'u hazır olana
+// kadar bekle (her ikisi de hızlı gelir → erken çıkış), sonra anlık kontrol.
+async function waitForDraftResumeModal(page: Page): Promise<boolean> {
+  await waitUntilArg(
+    page,
+    draftModalStateImpl,
+    draftModalArg("visibleOrInput"),
+    PUBLISH_TIMINGS.draftModalRaceMs,
+    PUBLISH_TIMINGS.draftModalPollMs,
+  );
+  return hasElArg(page, draftModalStateImpl, draftModalArg("visible"));
+}
+
+async function dismissDraftResumeModal(page: Page, logs: string[]): Promise<boolean> {
+  const foundModal = await waitForDraftResumeModal(page);
 
   if (!foundModal) {
     addLog(logs, "Taslak devam modalı görünmedi.");
-    return;
+    return false;
   }
 
   addLog(logs, "Taslak devam modalı bulundu.");
-  const findBtnText = "Hayır, Yeni Bir İlan Vermek İstiyorum";
+  const findBtnText = DRAFT_RESUME_BUTTON;
+  const waitForClose = () =>
+    waitUntilArg(
+      page,
+      draftModalStateImpl,
+      draftModalArg("absent"),
+      PUBLISH_TIMINGS.draftModalCloseTimeoutMs,
+      PUBLISH_TIMINGS.draftModalPollMs,
+    );
 
-  let dismissed = await page.evaluate((text) => {
+  // ── Yöntem 1: DOM click ──
+  const clicked = await page.evaluate((text) => {
     const buttons = Array.from(document.querySelectorAll("button"));
     const target = buttons.find(
       (b) => b.innerText.replace(/\s+/g, " ").trim() === text,
@@ -1013,17 +1520,11 @@ async function dismissDraftResumeModal(page: Page, logs: string[]) {
     return true;
   }, findBtnText);
 
-  await sleep(1200);
-  let stillVisible = await page.evaluate((text) => {
-    const buttons = Array.from(document.querySelectorAll("button"));
-    return buttons.some((b) => b.innerText.replace(/\s+/g, " ").trim() === text);
-  }, findBtnText);
+  let closed = clicked ? await waitForClose() : false;
 
-  if (!dismissed || stillVisible) {
-    if (dismissed && stillVisible) {
-      addLog(logs, "DOM click işe yaramadı, Puppeteer native click deneniyor...", "WARN");
-    }
-    dismissed = false;
+  // ── Yöntem 2: Puppeteer native click ──
+  if (!closed) {
+    if (clicked) addLog(logs, "DOM click işe yaramadı, Puppeteer native click deneniyor...", "WARN");
     try {
       const btnHandle = await page.evaluateHandle((text) => {
         const buttons = Array.from(document.querySelectorAll("button"));
@@ -1036,31 +1537,25 @@ async function dismissDraftResumeModal(page: Page, logs: string[]) {
       const element = btnHandle.asElement() as ElementHandle<Element> | null;
       if (element) {
         await element.evaluate((el: Element) => el.scrollIntoView({ block: "center" }));
-        await element.click({ delay: 50 });
-        await sleep(1000);
+        await element.click({ delay: 30 });
       }
       await btnHandle.dispose();
-
-      stillVisible = await page.evaluate((text) => {
-        const buttons = Array.from(document.querySelectorAll("button"));
-        return buttons.some((b) => b.innerText.replace(/\s+/g, " ").trim() === text);
-      }, findBtnText);
-
-      if (!stillVisible) dismissed = true;
+      closed = await waitForClose();
     } catch (e) {
       addLog(logs, `Puppeteer native click hatası: ${e instanceof Error ? e.message : "?"}`, "WARN");
     }
   }
 
-  if (!dismissed) {
+  // ── Yöntem 3: AngularJS scope ──
+  if (!closed) {
     addLog(logs, "AngularJS scope fallback deneniyor...", "WARN");
     try {
-      dismissed = await page.evaluate((text) => {
+      const invoked = await page.evaluate((text) => {
         const buttons = Array.from(document.querySelectorAll("button"));
         const target = buttons.find(
           (b) => b.innerText.replace(/\s+/g, " ").trim() === text,
         );
-        if (!target) return true;
+        if (!target) return false;
 
         const ng = (window as any).angular;
         if (!ng) return false;
@@ -1080,33 +1575,34 @@ async function dismissDraftResumeModal(page: Page, logs: string[]) {
         }
         return false;
       }, findBtnText);
-      if (dismissed) await sleep(1200);
+      if (invoked) closed = await waitForClose();
     } catch (e) {
       addLog(logs, `AngularJS fallback hatası: ${e instanceof Error ? e.message : "?"}`, "WARN");
     }
   }
 
-  if (!dismissed) {
+  if (!closed) {
     throw new Error("Taslak modalı kapatılamadı (DOM click, Puppeteer click ve AngularJS fallback denendi).");
   }
 
   addLog(logs, "Taslak modalında 'Hayır, Yeni Bir İlan Vermek İstiyorum' seçildi.");
-  await sleep(800);
+  return true;
 }
 
-async function dismissUsageLimitModal(page: Page, logs: string[]) {
-  const foundModal = await page
-    .waitForFunction(
-      () => {
-        const buttons = Array.from(document.querySelectorAll(".dialog-content.dialog-modern button"));
-        return buttons.some((b) => b.textContent?.replace(/\s+/g, " ").trim() === "Tamam");
-      },
-      { timeout: 4_000 },
-    )
-    .then(() => true)
-    .catch(() => false);
+// Tarayıcı bağlamında çalışır.
+function usageLimitModalVisible(): boolean {
+  const buttons = Array.from(document.querySelectorAll(".dialog-content.dialog-modern button"));
+  return buttons.some((b) => b.textContent?.replace(/\s+/g, " ").trim() === "Tamam");
+}
 
-  if (!foundModal) return;
+// Modal yokken 4sn beklemek yerine anlık kontrol yapar.
+// graceMs yalnızca bir submit tıklamasının hemen ardında verilir (modal geç belirebilir).
+async function dismissUsageLimitModal(page: Page, logs: string[], graceMs: number = 0) {
+  let found = await hasEl(page, usageLimitModalVisible);
+  if (!found && graceMs > 0) {
+    found = await waitUntil(page, usageLimitModalVisible, graceMs, 100);
+  }
+  if (!found) return;
 
   addLog(logs, "İlan paketi kullanım limiti uyarı modalı bulundu, 'Tamam' tıklanıyor...", "WARN");
 
@@ -1116,7 +1612,7 @@ async function dismissUsageLimitModal(page: Page, logs: string[]) {
     if (target) { target.scrollIntoView({ block: "center" }); target.click(); }
   });
 
-  await sleep(500);
+  await waitUntilGone(page, usageLimitModalVisible, 2_000, 100);
   addLog(logs, "İlan paketi uyarı modalı kapatıldı.", "OK");
 }
 
@@ -1154,21 +1650,21 @@ async function clickStepThreeContinue(page: Page) {
   return "text:Devam Et";
 }
 
-async function dismissDopingModal(page: Page, logs: string[]) {
-  const foundModal = await page
-    .waitForFunction(
-      () => {
-        const popup = document.querySelector<HTMLElement>(".first-classified-popup");
-        return !!popup;
-      },
-      { timeout: 5_000 },
-    )
-    .then(() => true)
-    .catch(() => false);
+// Tarayıcı bağlamında çalışır.
+function dopingPopupVisible(): boolean {
+  return !!document.querySelector(".first-classified-popup");
+}
 
-  if (!foundModal) {
+// Modal yokken 5sn beklemek yerine kısa bir tolerans penceresi kullanır.
+async function dismissDopingModal(page: Page, logs: string[], graceMs: number = PUBLISH_TIMINGS.dopingAppearMs) {
+  let found = await hasEl(page, dopingPopupVisible);
+  if (!found && graceMs > 0) {
+    found = await waitUntil(page, dopingPopupVisible, graceMs, 100);
+  }
+
+  if (!found) {
     addLog(logs, "Doping modalı görünmedi.");
-    return;
+    return false;
   }
 
   addLog(logs, "Doping modalı bulundu.");
@@ -1182,20 +1678,25 @@ async function dismissDopingModal(page: Page, logs: string[]) {
   });
 
   if (!clicked) throw new Error("Doping modalı bulundu ama kapatma butonuna tıklanamadı.");
+  await waitUntilGone(page, dopingPopupVisible, 2_000, 100);
   addLog(logs, "Doping modalı kapatıldı.");
-  await sleep(800);
+  return true;
 }
 
 async function clickDopingContinueButton(page: Page) {
-  await page.waitForFunction(
+  const ready = await waitUntil(
+    page,
     () => {
       const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button"));
       return buttons.some(
         (button) => button.innerText.replace(/\s+/g, " ").trim() === "Devam Et",
       );
     },
-    { timeout: 20_000 },
+    PUBLISH_TIMINGS.buttonReadyTimeoutMs,
   );
+  if (!ready) {
+    throw new Error("Doping sayfasindaki 'Devam Et' butonu bulunamadi.");
+  }
 
   const clicked = await page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button"));
@@ -1212,7 +1713,25 @@ async function clickDopingContinueButton(page: Page) {
   return "text:Devam Et";
 }
 
-export async function publishListing(listing: ListingDraft, mode: PublishMode) {
+export type PublishMeta = {
+  submitted: boolean;      // Son onay (adım-3) tıklandı — ilan yayınlanmış olabilir, tekrar denenmemeli
+  finalUrl?: string;
+  classifiedId?: string;
+  title: string;           // sahibinden'e fiilen yazılan başlık
+};
+
+export async function publishListing(listing: ListingDraft, mode: PublishMode, hooks?: PublishHooks) {
+  const meta: PublishMeta = { submitted: false, title: listing.name };
+  _hooks = hooks ?? null;
+  try {
+    const result = await runPublish(listing, mode, meta);
+    return { ...result, ...meta };
+  } finally {
+    _hooks = null;
+  }
+}
+
+async function runPublish(listing: ListingDraft, mode: PublishMode, meta: PublishMeta) {
   const botSettings = readSettings();
   _speedMultiplier = botSettings.speedMultiplier ?? 1;
 
@@ -1231,6 +1750,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
 
   _stepCounter = 0;
   _publishStartTime = Date.now();
+  _stepTimings.length = 0;
 
   const logs: string[] = [];
   addLog(logs, `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "STEP");
@@ -1250,10 +1770,14 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       addLog(logs, "Mevcut oturum bulunamadı, yeni tarayıcı başlatılıyor...", "INFO");
       browser = await puppeteer.launch({
         executablePath: resolveChromeExecutable(),
-        headless: false,
+        headless: botSettings.headless,
         userDataDir: getUserDataDir(),
         defaultViewport: null,
-        args: ["--start-maximized", "--remote-debugging-port=9222", "--disable-extensions"],
+        args: [
+          "--start-maximized",
+          "--remote-debugging-port=9222",
+          ...BROWSER_LAUNCH_FLAGS,
+        ],
       });
       shouldCloseBrowser = true;
       addLog(logs, "Yeni tarayıcı oturumu açıldı.", "OK");
@@ -1268,9 +1792,26 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
     addLog(logs, "Mevcut tarayıcı oturumuna bağlanıldı.", "OK");
   }
 
-  const page = await browser.newPage();
+  let page: Page;
+  try {
+    page = await browser.newPage();
+  } catch (error) {
+    // Sayfa açılamazsa açık bırakılan tarayıcı da sızmasın.
+    addLog(
+      logs,
+      `Yeni sayfa oluşturulamadı: ${error instanceof Error ? error.message : "?"}`,
+      "ERROR",
+    );
+    if (shouldCloseBrowser) {
+      await browser.close().catch(() => {});
+      shouldCloseBrowser = false;
+    }
+    return { ok: false, mode, logs };
+  }
+
   attachDebugLogging(browser, page, logs);
   addLog(logs, "Yeni sayfa (tab) oluşturuldu.", "OK");
+  await installResourceGuard(page, logs);
 
   try {
     addLog(logs, "Yeni ilan sayfası açılıyor (ilan-ver/fotograf-video)...", "INFO");
@@ -1280,58 +1821,77 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
     addLog(logs, `Sayfa yüklendi. URL: ${page.url()}`, "OK");
 
     addLog(logs, "Redirect bekleniyor (yeni draft oluşturuluyor)...", "INFO");
-    try {
-      await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 10000 });
-    } catch {
-      addLog(logs, "Redirect timeout — sayfa zaten hedefte olabilir.", "WARN");
+    const urlAfterGoto = page.url();
+    const redirected = await waitUntilArg(
+      page,
+      (a: { url: string }) =>
+        window.location.href !== a.url || !!document.querySelector("#uploadImageField"),
+      { url: urlAfterGoto },
+      PUBLISH_TIMINGS.initialRedirectTimeoutMs,
+      150,
+    );
+    if (!redirected || page.url() === urlAfterGoto) {
+      addLog(logs, "Redirect algılanmadı — sayfa zaten hedefte olabilir.", "WARN");
     }
+    await waitForDomReady(page);
     const afterRedirectUrl = page.url();
     addLog(logs, `Redirect sonrası URL: ${afterRedirectUrl}`, "OK");
 
-    if (afterRedirectUrl.includes("fotograf-video")) {
-      stepLog(logs, "FOTOĞRAF & VİDEO");
-      await dismissDraftResumeModal(page, logs);
+    // Girişte taslak devam modalı: HER açılışta kontrol et, varsa otomatik kapat.
+    // (URL hangi adıma düşerse düşsün çalışır — fotograf-video dalına bağlı değil.)
+    // Modal, input race'inden sonra geç belirirse diye ayrıca kısa bir pencerede taranır.
+    {
+      let dismissed = await dismissDraftResumeModal(page, logs);
 
-      for (let i = 0; i < 4; i++) {
-        await sleep(2000);
-        const modalStillUp = await page.evaluate(() => {
-          return Array.from(document.querySelectorAll("button")).some(
-            (b) => b.innerText.replace(/\s+/g, " ").trim() === "Hayır, Yeni Bir İlan Vermek İstiyorum",
-          );
-        });
-        if (!modalStillUp) break;
-        addLog(logs, `Taslak modalı hala görünüyor, tekrar kapatılıyor (${i + 1}/4)...`, "WARN");
-        await dismissDraftResumeModal(page, logs);
+      if (!dismissed) {
+        // Modal input race'inden sonra geç belirebilir; fotoğraf sayfasındaysak
+        // kısa bir pencerede tekrar tara (input yoksa anında çık).
+        await waitUntilArg(
+          page,
+          draftModalStateImpl,
+          draftModalArg("visibleOrNoInput"),
+          PUBLISH_TIMINGS.draftModalLatePollMs,
+          PUBLISH_TIMINGS.draftModalPollMs,
+        );
+        if (await hasElArg(page, draftModalStateImpl, draftModalArg("visible"))) {
+          addLog(logs, "Taslak devam modalı geç göründü, kapatılıyor...", "WARN");
+          dismissed = await dismissDraftResumeModal(page, logs);
+        }
       }
+
+      if (dismissed) {
+        const reappeared = await waitUntilArg(
+          page,
+          draftModalStateImpl,
+          draftModalArg("visible"),
+          PUBLISH_TIMINGS.draftModalRecheckTimeoutMs,
+          200,
+        );
+        if (reappeared) {
+          addLog(logs, "Taslak modalı tekrar görünüyor, tekrar kapatılıyor...", "WARN");
+          await dismissDraftResumeModal(page, logs);
+        }
+        addLog(logs, "Giriş taslak devam modalı kapatıldı.", "OK");
+      }
+    }
+
+    if (page.url().includes("fotograf-video")) {
+      stepLog(logs, "FOTOĞRAF & VİDEO");
 
       const imagePath = await resolveImagePath(listing);
       if (!imagePath || !fs.existsSync(imagePath)) {
         addLog(logs, `Görsel dosyası bulunamadı veya belirtilmemiş. Yol: ${imagePath || "(boş)"}`, "ERROR");
         await persistDebugScreenshot(page, logs);
         const totalElapsedNoImg = ((Date.now() - _publishStartTime) / 1000).toFixed(1);
+        logStepReport(logs);
         addLog(logs, `━━━ PUBLISH DURDURULDU — görsel yok (${totalElapsedNoImg}s) ━━━`, "ERROR");
         return { ok: false, mode, logs, error: "Görsel dosyası bulunamadı veya belirtilmemiş." };
       } else {
         const fileSize = fs.statSync(imagePath).size;
         addLog(logs, `Görsel doğrulandı: ${imagePath} (${(fileSize / 1024).toFixed(1)} KB)`, "OK");
 
-        const getUploadedCount = async () => page.evaluate(() => {
-          const selectors = [
-            '.classified-photo-list li',
-            '.photo-list li',
-            '.upload-photo-list li',
-            '[class*="photo-list"] li',
-            '[class*="photo"] li.photo-item',
-            '.image-list li',
-            '.photos li',
-          ];
-          for (const sel of selectors) {
-            const count = document.querySelectorAll(sel).length;
-            if (count > 0) return count;
-          }
-          const anyImg = document.querySelectorAll('.classified-photo-list li, [class*="photo"] li, [class*="image"] li, .upload-area img');
-          return anyImg.length;
-        }).catch(() => 0);
+        const getUploadedCount = async () =>
+          page.evaluate(countUploadedPhotos).catch(() => 0);
 
         let beforeCount = await getUploadedCount();
         addLog(logs, `Mevcut görsel sayısı: ${beforeCount}`, "DEBUG");
@@ -1361,21 +1921,18 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
           method = "cdp";
           const cdpOk = await uploadViaCDP(page, "#uploadImageField", imagePath, logs);
           if (cdpOk) {
-            addLog(logs, "CDP başarılı, upload işlemi bekleniyor...", "INFO");
-            await sleep(3000);
-            try {
-              await page.waitForFunction(
-                () => {
-                  const imgs = document.querySelectorAll(
-                    'img[src*="klassifiye"], img[src*="upload"], img[src*="photo"], .classified-photo-list li, [class*="photo-list"] li, [class*="photo"] img',
-                  );
-                  return imgs.length > 0;
-                },
-                { timeout: 15000 },
-              );
-              addLog(logs, "Görsel upload tamamlandı (DOM'da görsel tespit edildi).", "OK");
-            } catch {
-              addLog(logs, "Görsel DOM'da henüz görünmüyor, devam ediliyor...", "WARN");
+            addLog(logs, "CDP başarılı, yükleme bitişi bekleniyor...", "INFO");
+            // Kör 3sn bekleme yerine: sayım artsın + yükleme göstergesi bitsin +
+            // sayı sabitlensin (erken çıkışlı fazlar).
+            const complete = await waitForPhotoUploadComplete(
+              page,
+              beforeCount,
+              PUBLISH_TIMINGS.photoReadyTimeoutMs,
+            );
+            if (complete) {
+              addLog(logs, "Görsel yükleme tamamlandı (thumbnail hazır, yükleyici bitti).", "OK");
+            } else {
+              addLog(logs, "Yükleme bitiş sinyali alınamadı — Devam öncesi ek kontrol devrede.", "WARN");
             }
             uploaded = await getUploadedCount();
           }
@@ -1386,18 +1943,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
             method = "base64";
             const injectResult = await injectImageViaBase64(page, "#uploadImageField", imagePath);
             addLog(logs, `Injection sonucu: ${JSON.stringify(injectResult)}`, "DEBUG");
-            await sleep(3000);
-            try {
-              await page.waitForFunction(
-                () => {
-                  const imgs = document.querySelectorAll(
-                    'img[src*="klassifiye"], img[src*="upload"], img[src*="photo"], .classified-photo-list li, [class*="photo-list"] li, [class*="photo"] img',
-                  );
-                  return imgs.length > 0;
-                },
-                { timeout: 12000 },
-              );
-            } catch {}
+            await waitForPhotoUploadComplete(page, beforeCount, PUBLISH_TIMINGS.uploadFallbackTimeoutMs);
             uploaded = await getUploadedCount();
           }
 
@@ -1412,14 +1958,30 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       }
 
       addLog(logs, "Fotoğraf adımında 'Devam Et' tıklanıyor...", "INFO");
-      await sleep(1000);
-      try {
-        await clickContinueButton(page);
-        await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => null);
-        addLog(logs, `Fotoğraf sonrası URL: ${page.url()}`, "OK");
-      } catch (navErr) {
-        addLog(logs, `Fotoğraf Devam Et hatası: ${navErr instanceof Error ? navErr.message : "?"}`, "WARN");
+      addLog(logs, "Görsel yüklendikten sonra 'Devam Et' için 2 sn bekleniyor...", "INFO");
+      await sleep(PUBLISH_TIMINGS.photoContinueDelayMs);
+      const photoAdvanced = await clickContinueAndWait({
+        page,
+        label: "Fotoğraf adımı",
+        logs,
+        timeoutMs: PUBLISH_TIMINGS.navStepTimeoutMs,
+        retries: PUBLISH_TIMINGS.continueRetryCount,
+        readyTimeoutMs: PUBLISH_TIMINGS.continueReadyTimeoutMs,
+      });
+      if (!photoAdvanced) {
+        addLog(logs, `Fotoğraf adımında ilerleme sağlanamadı. Son URL: ${page.url()}`, "ERROR");
+        await persistDebugScreenshot(page, logs);
+        const photoStuckElapsed = ((Date.now() - _publishStartTime) / 1000).toFixed(1);
+        logStepReport(logs);
+        addLog(logs, `━━━ PUBLISH DURDURULDU — fotoğraf adımında ilerlenemedi (${photoStuckElapsed}s) ━━━`, "ERROR");
+        return {
+          ok: false,
+          mode,
+          logs,
+          error: "Fotoğraf adımında 'Devam Et' ile ilerleme sağlanamadı (görsel yüklemesi tamamlanmamış olabilir).",
+        };
       }
+      addLog(logs, `Fotoğraf sonrası URL: ${page.url()}`, "OK");
     } else {
       addLog(logs, `Fotoğraf-video sayfası algılanmadı (redirect olmuş olabilir). URL: ${page.url()}`, "WARN");
     }
@@ -1446,22 +2008,30 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       }
       if (mode === "draft") {
         addLog(logs, "Draft modu — son yayın adımından önce duruldu.", "OK");
+        logStepReport(logs);
         const elapsed = ((Date.now() - _publishStartTime) / 1000).toFixed(1);
         addLog(logs, `━━━ DRAFT TAMAMLANDI (${elapsed}s) ━━━`, "STEP");
         return { ok: true, mode, logs };
       }
       addLog(logs, "Adim-2 'Devam Et' tıklanıyor...", "INFO");
-      await sleep(500);
-      try {
-        await page.evaluate(() => {
-          const btn = document.querySelector('.add-classified-submit') as HTMLButtonElement;
-          if (btn) btn.click();
-        });
-        await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => null);
-        addLog(logs, `Adim-2 sonrası URL: ${page.url()}`, "OK");
-      } catch (err) {
-        addLog(logs, `Adim-2 Devam Et hatası: ${err instanceof Error ? err.message : "?"}`, "WARN");
+      await sleep(PUBLISH_TIMINGS.minSettleMs);
+      const adim2Advanced = await clickContinueAndWait({
+        page,
+        label: "Adim-2",
+        logs,
+        timeoutMs: PUBLISH_TIMINGS.navFormTimeoutMs,
+        retries: 2,
+        readyTimeoutMs: PUBLISH_TIMINGS.continueReadyTimeoutMs,
+      });
+      if (!adim2Advanced) {
+        addLog(logs, `Adim-2 adımında ilerleme sağlanamadı. Son URL: ${page.url()}`, "ERROR");
+        await persistDebugScreenshot(page, logs);
+        const adim2Elapsed = ((Date.now() - _publishStartTime) / 1000).toFixed(1);
+        logStepReport(logs);
+        addLog(logs, `━━━ PUBLISH DURDURULDU — adim-2'de ilerlenemedi (${adim2Elapsed}s) ━━━`, "ERROR");
+        return { ok: false, mode, logs, error: "Adim-2 (kurallar onayı) adımında 'Devam Et' ile ilerleme sağlanamadı." };
       }
+      addLog(logs, `Adim-2 sonrası URL: ${page.url()}`, "OK");
     }
 
     if (page.url().includes("ilan-bilgileri")) {
@@ -1471,8 +2041,16 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       addLog(logs, "İlan detay formu yüklendi.", "OK");
 
       addLog(logs, "Başlık dolduruluyor...", "INFO");
-      await fillInputValue(page, 'input[name="addClassifiedTitle"]', listing.name);
-      addLog(logs, `Başlık → "${listing.name}"`, "OK");
+      let finalTitle = withInstallmentEmphasis(listing.name);
+      await fillInputValue(page, 'input[name="addClassifiedTitle"]', finalTitle);
+      const titleMaxLength = await page.$eval('input[name="addClassifiedTitle"]', (el) => (el as HTMLInputElement).maxLength).catch(() => -1);
+      if (titleMaxLength > 0 && finalTitle.length > titleMaxLength) {
+        finalTitle = fitTitleToLength(finalTitle, titleMaxLength);
+        await fillInputValue(page, 'input[name="addClassifiedTitle"]', finalTitle);
+        addLog(logs, `Başlık ${listing.name.length} karakter, sınır ${titleMaxLength} — kısaltıldı.`, "WARN");
+      }
+      meta.title = finalTitle;
+      addLog(logs, `Başlık → "${finalTitle}" (${finalTitle.length}${titleMaxLength > 0 ? `/${titleMaxLength}` : ""} karakter)`, "OK");
 
       addLog(logs, "Açıklama dolduruluyor...", "INFO");
       try {
@@ -1551,8 +2129,15 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       }
 
       try {
-        const matched = await selectUsingSelectorsWithHeuristic(page, ['select[name="condition"]'], DEFAULT_CONDITION);
-        addLog(logs, `Durum → "${DEFAULT_CONDITION}" (${matched.mode}, ${matched.selector})`, "OK");
+        const selectedCondition = String(
+          listing.condition || botSettings?.defaultCondition || DEFAULT_CONDITION,
+        );
+        const matched = await selectUsingSelectorsWithHeuristic(
+          page,
+          ['select[name="condition"]'],
+          selectedCondition,
+        );
+        addLog(logs, `Durum → "${selectedCondition}" (${matched.mode}, ${matched.selector})`, "OK");
       } catch (error) {
         addLog(logs, `Durum seçilemedi: ${error instanceof Error ? error.message : "?"}`, "WARN");
       }
@@ -1591,15 +2176,28 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         }
       }
 
-      await sleep(300);
+      // Marka seçildikten sonra model seçenekleri asenkron yüklenir.
+      // Kör 300ms bekleme yerine: model select'lerinden biri dolduğunda devam et.
+      const modelSelectors = await expandExistingSelectors(page, [
+        'select[name="a91534"]', 'select[name="a91566"]', 'select[name="a91558"]',
+        'select[name^="a9155"]', 'select[name^="a9156"]',
+      ]);
+      await waitUntilArg(
+        page,
+        (sels: string[]) =>
+          sels.some((s) => {
+            const el = document.querySelector(s) as HTMLSelectElement | null;
+            return !!el && el.options.length > 1;
+          }),
+        modelSelectors,
+        PUBLISH_TIMINGS.modelOptionsTimeoutMs,
+        100,
+      );
 
       try {
         const matched = await selectUsingSelectorsWithHeuristic(
           page,
-          await expandExistingSelectors(page, [
-            'select[name="a91534"]', 'select[name="a91566"]', 'select[name="a91558"]',
-            'select[name^="a9155"]', 'select[name^="a9156"]',
-          ]),
+          modelSelectors,
           listing.model,
         );
         addLog(logs, `Model → "${listing.model}" (${matched.mode}, ${matched.selector})`, "OK");
@@ -1736,7 +2334,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         } else {
           addLog(logs, `Mahalle seçilemedi: ${quarterResult.label}`, "WARN");
         }
-        await sleep(300);
+        await sleep(PUBLISH_TIMINGS.selectSettleMs);
       } catch (err) {
         addLog(logs, `Mahalle seçimi hatası: ${err instanceof Error ? err.message : "?"}`, "DEBUG");
       }
@@ -1773,6 +2371,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
 
       if (mode === "draft") {
         addLog(logs, "Draft modu — son yayın adımından önce duruldu.", "OK");
+        logStepReport(logs);
         const elapsed = ((Date.now() - _publishStartTime) / 1000).toFixed(1);
         addLog(logs, `━━━ DRAFT TAMAMLANDI (${elapsed}s) ━━━`, "STEP");
         return { ok: true, mode, logs };
@@ -1780,20 +2379,24 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
 
       stepLog(logs, "FORM DEVAM BUTONU");
       addLog(logs, "Devam butonu tıklanıyor...", "INFO");
-      await sleep(500);
+      await sleep(PUBLISH_TIMINGS.minSettleMs);
 
-      try {
-        await page.evaluate(() => {
-          const btn = document.querySelector('.add-classified-submit') as HTMLButtonElement;
-          if (btn) { btn.scrollIntoView({ block: "center" }); btn.click(); }
-        });
-        addLog(logs, "Form submit butonu tıklandı.", "OK");
-      } catch {
-        const continueTrigger = await clickContinueButton(page);
-        addLog(logs, `Devam butonuna tıklandı (fallback). Yöntem: ${continueTrigger}`, "OK");
+      const formAdvanced = await clickContinueAndWait({
+        page,
+        label: "Form devam",
+        logs,
+        timeoutMs: PUBLISH_TIMINGS.navFormTimeoutMs,
+        retries: 2,
+        readyTimeoutMs: PUBLISH_TIMINGS.continueReadyTimeoutMs,
+      });
+      if (!formAdvanced) {
+        addLog(logs, `Form devam adımında ilerleme sağlanamadı. Son URL: ${page.url()}`, "ERROR");
+        await persistDebugScreenshot(page, logs);
+        const formElapsed = ((Date.now() - _publishStartTime) / 1000).toFixed(1);
+        logStepReport(logs);
+        addLog(logs, `━━━ PUBLISH DURDURULDU — form devam butonunda ilerlenemedi (${formElapsed}s) ━━━`, "ERROR");
+        return { ok: false, mode, logs, error: "İlan bilgileri formunda 'Devam' ile ilerleme sağlanamadı." };
       }
-
-      await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => null);
       addLog(logs, `Form sonrası URL: ${page.url()}`, "INFO");
 
       if (page.url().includes("kategori-tahmini")) {
@@ -1801,7 +2404,8 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         addLog(logs, "Kategori tahmin sayfası — manuel seçim yapılıyor...", "INFO");
 
         try {
-          await page.waitForSelector('a.post-get-btn-sicily, a.btn-link', { timeout: 10_000 }).catch(() => null);
+          await page.waitForSelector('a.post-get-btn-sicily, a.btn-link', { timeout: PUBLISH_TIMINGS.buttonReadyTimeoutMs }).catch(() => null);
+          const kategoriGuessUrl = page.url();
           const clicked = await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll<HTMLElement>("a, button"));
             const target = btns.find((el) =>
@@ -1812,7 +2416,8 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
           });
           if (clicked) {
             addLog(logs, "Başka Bir Kategori Seçmek İstiyorum → tıklandı.", "OK");
-            await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => null);
+            await waitForUrlChangeFrom(page, kategoriGuessUrl, PUBLISH_TIMINGS.categoryNavTimeoutMs);
+            await waitForDomReady(page);
             addLog(logs, `Kategori seçim sayfası URL: ${page.url()}`, "INFO");
           } else {
             addLog(logs, "Kategori tahmin butonu bulunamadı!", "WARN");
@@ -1836,7 +2441,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
             addLog(logs, `Kategori seçildi: ${clickedLabel}`, "OK");
           }
           addLog(logs, "Kategori seçimi tamamlandı, 'Devam Et' tıklanıyor...", "INFO");
-          await sleep(300);
+          await sleep(PUBLISH_TIMINGS.minSettleMs);
 
           await page.evaluate(() => {
             const el = document.getElementById("sicilyManuel");
@@ -1845,8 +2450,18 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
               (el as HTMLElement).style.setProperty("display", "block", "important");
             }
           });
-          await sleep(500);
+          // sicilyManuel görünür olana kadar bekle (kör 500ms yerine, erken çıkışlı)
+          await waitUntil(
+            page,
+            () => {
+              const el = document.getElementById("sicilyManuel");
+              return !!el && (el as HTMLElement).offsetParent !== null;
+            },
+            PUBLISH_TIMINGS.sicilyVisibleTimeoutMs,
+            100,
+          );
 
+          const kategoriDevamUrl = page.url();
           let devamClicked = false;
           try {
             await page.waitForSelector("#sicilyManuel", { timeout: 5000 });
@@ -1896,7 +2511,8 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
 
           if (devamClicked) {
             addLog(logs, "'Devam Et' tıklandı.", "OK");
-            await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => null);
+            await waitForUrlChangeFrom(page, kategoriDevamUrl, PUBLISH_TIMINGS.categoryNavTimeoutMs);
+            await waitForDomReady(page);
             addLog(logs, `Kategori seçimi sonrası URL: ${page.url()}`, "INFO");
           } else {
             addLog(logs, "'Devam Et' butonu bulunamadı!", "WARN");
@@ -1906,6 +2522,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
           addLog(logs, `Adım adım kategori hatası: ${message}`, "ERROR");
           await persistDebugScreenshot(page, logs);
           const totalElapsedCat = ((Date.now() - _publishStartTime) / 1000).toFixed(1);
+          logStepReport(logs);
           addLog(logs, `━━━ PUBLISH DURDURULDU — kategori seçilemedi (${totalElapsedCat}s) ━━━`, "ERROR");
           return { ok: false, mode, logs, error: `Kategori seçilemedi: ${message}` };
         }
@@ -1916,19 +2533,53 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
 
     stepLog(logs, "ÜRÜN ÖZELLİKLERİ");
 
+    // Doping kontrolü: eski sürümde modal yokken bile 5sn (doping modalı) +
+    // 20sn ("Devam Et" butonu) kaybediliyordu. Artık popup kısa bir tolerans
+    // penceresinde aranıyor, buton tıklaması yalnızca doping sayfasında yapılıyor.
     try {
       await dismissDopingModal(page, logs);
-      await clickDopingContinueButton(page);
+      if (page.url().includes("/ilan-ver/doping/")) {
+        await clickDopingContinueButton(page);
+        await waitForUrl(page, "doping", "excludes", PUBLISH_TIMINGS.navStepTimeoutMs);
+        await waitForDomReady(page);
+      }
     } catch {}
 
     if (page.url().includes("urun-ozellikleri")) {
       try {
+        // Select'ler asenkron doluyor; hazır değilken doldurma yapılırsa
+        // "0 doldurulabilir select" kalıyor ve Devam navigasyonu yapmıyor.
+        const selectsReady = await waitForProductSelectsReady(page, PUBLISH_TIMINGS.productSelectsTimeoutMs);
+        if (selectsReady) {
+          addLog(logs, "Ürün özellikleri select'leri hazır.", "OK");
+        } else {
+          addLog(logs, `Select'ler ${PUBLISH_TIMINGS.productSelectsTimeoutMs}ms içinde hazır görünmedi — mevcut durumla devam ediliyor.`, "WARN");
+        }
+
         await logVisibleSelects(page, logs);
         await fillAllVisibleSelects(page, logs, listing as unknown as Record<string, unknown>, botSettings);
-        await sleep(1500);
+        await sleep(PUBLISH_TIMINGS.minSettleMs);
+
+        // Select değişimleri sırasında geç beliren doping popup'ını kapat.
+        await dismissDopingModal(page, logs, 0);
+
         addLog(logs, "Final 'Devam' tıklanıyor...", "INFO");
-        await clickContinueButton(page);
-        await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
+        const ozelliklerAdvanced = await clickContinueAndWait({
+          page,
+          label: "Ürün özellikleri",
+          logs,
+          timeoutMs: PUBLISH_TIMINGS.navStepTimeoutMs,
+          retries: 2,
+          readyTimeoutMs: PUBLISH_TIMINGS.continueReadyTimeoutMs,
+        });
+        if (!ozelliklerAdvanced) {
+          addLog(logs, `Ürün özellikleri adımında ilerleme sağlanamadı. Son URL: ${page.url()}`, "ERROR");
+          await persistDebugScreenshot(page, logs);
+          const ozelliklerElapsed = ((Date.now() - _publishStartTime) / 1000).toFixed(1);
+          logStepReport(logs);
+          addLog(logs, `━━━ PUBLISH DURDURULDU — ürün özelliklerinde ilerlenemedi (${ozelliklerElapsed}s) ━━━`, "ERROR");
+          return { ok: false, mode, logs, error: "Ürün özellikleri adımında 'Devam' ile ilerleme sağlanamadı (select'ler doldurulmamış olabilir)." };
+        }
       } catch (error) {
         addLog(logs, `Final ürün özellikleri hatası: ${error instanceof Error ? error.message : "?"}`, "WARN");
       }
@@ -1937,47 +2588,40 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
     if (page.url().includes("teslimat-tercihleri")) {
       stepLog(logs, "TESLİMAT TERCİHLERİ");
       try {
-        await page.waitForFunction(() => {
+        // Loader/overlay temizliği: tipik olarak anında hazır (eski: sabit 10sn pencere)
+        await waitUntil(page, () => {
           const loader = document.querySelector('.loading, .spinner, .loader, [class*="loading"], [class*="spinner"]');
           const overlay = document.querySelector(".overlay, .modal-backdrop");
           return !loader && !overlay;
-        }, { timeout: 10000 }).catch(() => null);
+        }, PUBLISH_TIMINGS.loaderTimeoutMs, 100);
 
-        await sleep(500);
+        await sleep(PUBLISH_TIMINGS.minSettleMs);
         addLog(logs, "Teslimat tercihleri 'Devam Et' tıklanıyor...", "INFO");
 
-        await page.waitForFunction(() => {
-          const btn = document.querySelector('button.add-classified-submit') as HTMLButtonElement;
-          return btn && !btn.disabled;
-        }, { timeout: 10000 }).catch(() => null);
+        await waitUntil(page, () => {
+          const btn = document.querySelector('button.add-classified-submit') as HTMLButtonElement | null;
+          return !!btn && !btn.disabled;
+        }, PUBLISH_TIMINGS.buttonReadyTimeoutMs);
 
+        const teslimatUrl = page.url();
         await page.evaluate(() => {
           const btn = document.querySelector('button.add-classified-submit') as HTMLButtonElement;
           if (btn) btn.click();
         });
 
-        await dismissUsageLimitModal(page, logs);
-
-        let navigated = false;
-        try {
-          await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 });
-          navigated = true;
-        } catch {
+        let navigated = await waitAfterSubmit(page, teslimatUrl, logs, PUBLISH_TIMINGS.navSubmitTimeoutMs);
+        if (!navigated) {
           addLog(logs, "Teslimat tercihleri navigation timeout, tekrar tıklanıyor...", "WARN");
           await page.evaluate(() => {
             const btn = document.querySelector('button.add-classified-submit') as HTMLButtonElement;
             if (btn && !btn.disabled) btn.click();
           });
-          await dismissUsageLimitModal(page, logs);
-          try {
-            await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 20000 });
-            navigated = true;
-          } catch {
-            addLog(logs, "Teslimat tercihleri 2. navigation timeout!", "ERROR");
-          }
+          navigated = await waitAfterSubmit(page, teslimatUrl, logs, PUBLISH_TIMINGS.navSubmitTimeoutMs);
+          if (!navigated) addLog(logs, "Teslimat tercihleri 2. navigation timeout!", "ERROR");
         }
 
         if (navigated) {
+          await waitForDomReady(page);
           addLog(logs, `Teslimat tercihleri adımı tamamlandı. URL: ${page.url()}`, "OK");
         }
       } catch (err) {
@@ -1991,14 +2635,15 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
         addLog(logs, "Fiyat alanı dolduruluyor...", "INFO");
         await fillInputValue(page, 'input[name="addClassifiedPrice"]', String(listing.price));
         addLog(logs, `Fiyat → ${listing.price} TL`, "OK");
-        await sleep(300);
+        await sleep(PUBLISH_TIMINGS.minSettleMs);
         addLog(logs, "Fiyat sayfasında 'Devam Et' tıklanıyor...", "INFO");
+        const fiyatUrl = page.url();
         await page.evaluate(() => {
           const btn = document.querySelector('button.add-classified-submit') as HTMLButtonElement;
           if (btn) btn.click();
         });
-        await dismissUsageLimitModal(page, logs);
-        await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
+        await waitAfterSubmit(page, fiyatUrl, logs, PUBLISH_TIMINGS.navStepTimeoutMs);
+        await waitForDomReady(page);
         addLog(logs, "Fiyat adımı tamamlandı.", "OK");
       } catch (err) {
         addLog(logs, `Fiyat adımında hata: ${err instanceof Error ? err.message : "?"}`, "WARN");
@@ -2013,31 +2658,64 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       if (loopUrl.includes("adim-3")) {
         stepLog(logs, "ÖNİZLEME");
         try {
-          await page.waitForSelector("button.btn", { timeout: 5000 }).catch(() => null);
-          await sleep(1000);
+          const previewContinueSelector =
+            '.classified-preview-buttons.preview-btn-sicily button[ng-click="submitClassified()"]';
+
+          await waitUntil(page, () => {
+            const primary = document.querySelector<HTMLButtonElement>(
+              '.classified-preview-buttons.preview-btn-sicily button[ng-click="submitClassified()"]',
+            );
+            if (primary && !primary.disabled) return true;
+
+            return Array.from(document.querySelectorAll<HTMLButtonElement>("button.btn")).some(
+              (b) =>
+                !b.disabled &&
+              (b.textContent?.includes("Devam Et") || b.getAttribute("ng-click") === "submitClassified()"),
+            );
+          }, PUBLISH_TIMINGS.previewContinueReadyTimeoutMs, 50);
+          addLog(logs, "Adım-3 ekranında 'Devam Et' öncesi 2 sn bekleniyor...", "INFO");
+          await sleep(PUBLISH_TIMINGS.previewContinueDelayMs);
+          // Son onaydan önce kalıcı işaret: süreç tıklamadan sonra ölürse yeniden yayınlanmaz.
+          if (_hooks?.onBeforeSubmit) {
+            let allowed = true;
+            try {
+              allowed = (await _hooks.onBeforeSubmit()) !== false;
+            } catch (hookError) {
+              allowed = false;
+              addLog(logs, `Son onay işareti yazılamadı: ${hookError instanceof Error ? hookError.message : "?"}`, "WARN");
+            }
+            if (!allowed) throw new PublishVetoError("Son onay verilmedi (kuyruk sahipliği doğrulanamadı) — ilan gönderilmedi.");
+          }
           addLog(logs, "Adım-3 onay sayfası 'Devam Et' tıklanıyor...", "INFO");
 
-          const clicked = await page.evaluate(() => {
-            const btns = Array.from(document.querySelectorAll("button.btn"));
-            const submitBtn = btns.find(
-              (b) => b.textContent?.includes("Devam Et") || b.getAttribute("ng-click") === "submitClassified()",
-            ) as HTMLButtonElement;
-            if (submitBtn) { submitBtn.click(); return true; }
+          const clicked = await page.evaluate((selector) => {
+            const submitBtn =
+              document.querySelector<HTMLButtonElement>(selector) ??
+              Array.from(document.querySelectorAll<HTMLButtonElement>("button.btn")).find(
+                (b) => b.textContent?.includes("Devam Et") || b.getAttribute("ng-click") === "submitClassified()",
+              );
+            if (submitBtn && !submitBtn.disabled) {
+              submitBtn.scrollIntoView({ block: "center" });
+              submitBtn.click();
+              return true;
+            }
             return false;
-          });
+          }, previewContinueSelector);
 
           if (clicked) {
-            await sleep(2000);
-            try {
-              await page.waitForFunction(() => !window.location.href.includes("adim-3"), { timeout: 25000 });
-            } catch {
+            meta.submitted = true;
+            addLog(logs, "Son onay gönderildi — bu noktadan sonra ilan tekrar denenmeyecek.", "INFO");
+            const leftPreview = await waitForUrl(page, "adim-3", "excludes", PUBLISH_TIMINGS.previewLeaveTimeoutMs);
+            if (!leftPreview) {
               addLog(logs, "Adım-3 → sonraki adım geçişi timeout, URL kontrol ediliyor...", "WARN");
             }
+            await waitForDomReady(page);
             addLog(logs, `Adım-3 sonrası URL: ${page.url()}`, "INFO");
           } else {
             addLog(logs, "Adım-3 onay butonu bulunamadı!", "WARN");
           }
         } catch (err) {
+          if (err instanceof PublishVetoError) throw err; // son onay iptal: döngüde tekrar denenmesin
           addLog(logs, `Adım-3 onay adımında hata: ${err instanceof Error ? err.message : "?"}`, "WARN");
         }
       }
@@ -2050,7 +2728,8 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
             const btn = document.querySelector('button.btn[ng-click="submit()"]') as HTMLButtonElement;
             if (btn) btn.click();
           });
-          await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
+          await waitForUrl(page, "doping", "excludes", PUBLISH_TIMINGS.navStepTimeoutMs);
+          await waitForDomReady(page);
           addLog(logs, `Doping sonrası URL: ${page.url()}`, "INFO");
         } catch (err) {
           addLog(logs, `Doping sayfasında hata: ${err instanceof Error ? err.message : "?"}`, "WARN");
@@ -2060,16 +2739,31 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       if (page.url().includes("tebrikler")) {
         stepLog(logs, "TEBRİKLER");
         addLog(logs, "İlan başarıyla yayınlandı! Tebrikler sayfası.", "OK");
+        meta.classifiedId = await extractClassifiedId(page);
+        addLog(logs, meta.classifiedId ? `İlan No: ${meta.classifiedId}` : "İlan No sayfadan okunamadı.", meta.classifiedId ? "OK" : "WARN");
       }
 
-      await sleep(1000);
+      // Bir sonraki adıma geçişi bekle: URL değiştiğinde anında dön (kör 1sn yok).
+      await waitUntilArg(
+        page,
+        (a: { url: string }) => window.location.href !== a.url,
+        { url: loopUrl },
+        PUBLISH_TIMINGS.loopStepTimeoutMs,
+        100,
+      );
     }
 
     const finalUrl = page.url();
+    meta.finalUrl = finalUrl;
+    if (finalUrl.includes("tebrikler") || finalUrl.includes("doping")) meta.submitted = true;
+    if (finalUrl.includes("tebrikler") && !meta.classifiedId) {
+      meta.classifiedId = await extractClassifiedId(page);
+      if (meta.classifiedId) addLog(logs, `İlan No: ${meta.classifiedId}`, "OK");
+    }
     const totalElapsed = ((Date.now() - _publishStartTime) / 1000).toFixed(1);
 
     const isSuccess = finalUrl.includes("tebrikler") || finalUrl.includes("doping");
-    const isStuck = finalUrl.includes("teslimat-tercihleri") || finalUrl.includes("urun-fiyati") || finalUrl.includes("ilan-bilgileri") || finalUrl.includes("fotograf-video");
+    const isStuck = finalUrl.includes("teslimat-tercihleri") || finalUrl.includes("urun-fiyati") || finalUrl.includes("ilan-bilgileri") || finalUrl.includes("fotograf-video") || finalUrl.includes("urun-ozellikleri") || finalUrl.includes("adim-2");
 
     if (isStuck) {
       addLog(logs, `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "STEP");
@@ -2077,9 +2771,11 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
       addLog(logs, `  Süre: ${totalElapsed}s`, "STEP");
       addLog(logs, `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "STEP");
       await persistDebugScreenshot(page, logs);
+      logStepReport(logs);
       return { ok: false, mode, logs, error: `Sayfa takılı kaldı: ${finalUrl.split("?")[0]}` };
     }
 
+    logStepReport(logs);
     addLog(logs, `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "STEP");
     addLog(logs, `  ✅ PUBLISH TAMAMLANDI — ${totalElapsed}s (URL: ${finalUrl.split("?")[0]})`, "STEP");
     addLog(logs, `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, "STEP");
@@ -2090,6 +2786,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
 
     addLog(logs, `━━━ KRİTİK HATA YAKALANDI ━━━`, "ERROR");
     addLog(logs, `Son URL: ${page.url()}`, "ERROR");
+    meta.finalUrl = page.url();
 
     try {
       const title = await page.title();
@@ -2108,6 +2805,7 @@ export async function publishListing(listing: ListingDraft, mode: PublishMode) {
     addLog(logs, errorMsg, "ERROR");
 
     const totalElapsed2 = ((Date.now() - _publishStartTime) / 1000).toFixed(1);
+    logStepReport(logs);
     addLog(logs, `━━━ PUBLISH BAŞARISIZ — ${totalElapsed2}s ━━━`, "ERROR");
 
     return { ok: false, mode, logs };

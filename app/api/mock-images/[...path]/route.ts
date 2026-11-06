@@ -18,11 +18,14 @@ export async function GET(
   }
 
   const filePath = path.join(process.cwd(), "mock-image", ...segments);
+  const ext = path.extname(segments[segments.length - 1]).toLowerCase();
+  if (![".jpg", ".jpeg", ".png", ".gif", ".webp"].includes(ext)) {
+    return NextResponse.json({ error: "Invalid path" }, { status: 400 });
+  }
 
   try {
     const buffer = await readFile(filePath);
     const filename = segments[segments.length - 1];
-    const ext = path.extname(filename).toLowerCase();
     const contentType =
       ext === ".png"  ? "image/png"  :
       ext === ".gif"  ? "image/gif"  :

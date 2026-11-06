@@ -49,7 +49,7 @@ export interface BotSettings {
 
 export const DEFAULT_SETTINGS: BotSettings = {
   speedMultiplier: 1,
-  queueDelaySeconds: 5,
+  queueDelaySeconds: 2,
   maxRetries: 2,
 
   defaultPublishMode: "publish",

@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { publishListing } from "@/lib/puppeteer";
+import { runGuardedPublish } from "@/lib/publish-service";
 
 const publishSchema = z.object({
   mode: z.enum(["draft", "publish"]),
   reviewedForPublish: z.boolean().optional(),
+  queueId: z.string().optional(),
+  attempt: z.number().optional(),
   draft: z.object({
     _id: z.string(),
     name: z.string(),
@@ -46,33 +48,20 @@ const publishSchema = z.object({
   })
 });
 
+// Tek seferlik/elle yayın. Kuyruk artık sunucudaki motorla (POST /api/queue/run) ilerler; mükerrer
+// koruması ve yayın logu her iki yolda da lib/publish-service.ts içindeki ortak akıştan geçer.
 export async function POST(request: Request) {
   try {
     const json = await request.json();
     const payload = publishSchema.parse(json);
 
-    if (payload.mode === "publish" && payload.draft.warnings.length > 0 && !payload.reviewedForPublish) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "Dusuk guvenli alanlar gozden gecirilmeden publish moduna gecilemez."
-        },
-        { status: 400 }
-      );
+    const result = await runGuardedPublish(payload);
+    if (result.rejected) {
+      return NextResponse.json({ ok: false, error: result.error }, { status: result.status ?? 400 });
     }
 
-    if (!payload.draft.imagePath && !payload.draft.imageUrl) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "İlanda görsel yok — sahibinden fotoğraf olmadan devam ettirmiyor. Kuyruğa eklemeden önce bir görsel ekleyin."
-        },
-        { status: 400 }
-      );
-    }
-
-    const result = await publishListing(payload.draft, payload.mode);
-    return NextResponse.json(result);
+    const { rejected: _rejected, status: _status, ...body } = result;
+    return NextResponse.json(body);
   } catch (error) {
     return NextResponse.json(
       {

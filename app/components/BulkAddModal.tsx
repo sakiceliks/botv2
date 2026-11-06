@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { motion } from "framer-motion";
 import {
   X,
@@ -17,12 +17,14 @@ import {
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import {
-  BRANDS,
-  SLOGANS,
   TOWNS,
   DEFAULT_DESCRIPTION,
-  getColorsForModel
+  getSlogansFor,
+  getUniqueSlogansForCount,
+  buildListingTitle,
+  getStorageForModel,
 } from "@/lib/manual-data";
+import { useCatalog } from "@/hooks/use-catalog";
 import type { ListingDraft } from "@/lib/types";
 import { getPriceRangeForModel } from "@/lib/price-utils";
 import type { BotSettings } from "@/lib/settings";
@@ -33,9 +35,11 @@ interface BulkAddModalProps {
 }
 
 export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
-  const [selectedBrand, setSelectedBrand] = useState(BRANDS[0].name);
-  const [selectedModel, setSelectedModel] = useState(BRANDS[0].models[0]);
-  const [selectedSlogan, setSelectedSlogan] = useState(SLOGANS[0]);
+  const { activeBrands, getColorsForModel, toModelSlug } = useCatalog();
+  const [selectedBrand, setSelectedBrand] = useState("");
+  const [selectedModel, setSelectedModel] = useState("");
+  const [selectedSlogan, setSelectedSlogan] = useState("");
+  const [selectedCondition, setSelectedCondition] = useState("Sıfır");
   const [selectedColor, setSelectedColor] = useState("");
   const [quickAdding, setQuickAdding] = useState(false);
   const [quickProgress, setQuickProgress] = useState({ current: 0, total: 0 });
@@ -44,13 +48,32 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
   const [priceMin, setPriceMin] = useState(48000);
   const [priceMax, setPriceMax] = useState(50000);
 
+  // Katalog yüklenince ilk aktif marka/modeli seç
+  useEffect(() => {
+    if (activeBrands.length === 0) return;
+    const brandEntry = activeBrands.find((b) => b.name === selectedBrand);
+    if (!brandEntry) {
+      const first = activeBrands[0];
+      setSelectedBrand(first.name);
+      setSelectedModel(first.models.find((m) => m.active)?.name ?? first.models[0]?.name ?? "");
+      return;
+    }
+    if (selectedModel && !brandEntry.models.some((m) => m.name === selectedModel)) {
+      setSelectedModel(brandEntry.models.find((m) => m.active)?.name ?? "");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBrands]);
+
+  const modelStorage = getStorageForModel(selectedModel);
+
   // Settings'ten fiyat aralığını yükle
   useEffect(() => {
     fetch("/api/settings")
       .then((r) => r.json())
       .then((data: { ok: boolean; settings: BotSettings }) => {
         if (data.ok) {
-          const range = getPriceRangeForModel(data.settings, selectedBrand, selectedModel);
+          setSelectedCondition(data.settings.defaultCondition || "Sıfır");
+          const range = getPriceRangeForModel(data.settings.modelPriceRanges, selectedBrand, selectedModel);
           setPriceMin(range.min);
           setPriceMax(range.max);
         }
@@ -65,7 +88,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
       .then((r) => r.json())
       .then((data: { ok: boolean; settings: BotSettings }) => {
         if (data.ok) {
-          const range = getPriceRangeForModel(data.settings, brand, model);
+          const range = getPriceRangeForModel(data.settings.modelPriceRanges, brand, model);
           setPriceMin(range.min);
           setPriceMax(range.max);
         }
@@ -75,8 +98,8 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
 
   const handleBrandChange = (brandName: string) => {
     setSelectedBrand(brandName);
-    const brand = BRANDS.find((b) => b.name === brandName);
-    const firstModel = brand?.models[0] ?? selectedModel;
+    const brand = activeBrands.find((b) => b.name === brandName);
+    const firstModel = brand?.models.find((m) => m.active)?.name ?? brand?.models[0]?.name ?? selectedModel;
     if (brand && brand.models.length > 0) setSelectedModel(firstModel);
     updatePriceRange(brandName, firstModel);
   };
@@ -86,19 +109,15 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
     updatePriceRange(selectedBrand, model);
   };
 
-  // Marka adı yerine cihaz adını kullan: Apple → "iphone", Samsung → "samsung"
-  const BRAND_FOLDER_PREFIX: Record<string, string> = {
-    "Apple": "iphone",
-    "Samsung": "samsung",
-    "Xiaomi": "xiaomi",
-  };
+  // Marka/model değişince havuz yeniden hesaplanır; seçili slogan havuzda yoksa sıfırlanır.
+  const sloganPool = useMemo(
+    () => getSlogansFor(selectedBrand, selectedModel),
+    [selectedBrand, selectedModel]
+  );
 
-  const toModelSlug = (brand: string, model: string) => {
-    const prefix = BRAND_FOLDER_PREFIX[brand] ?? brand.toLowerCase();
-    // "Xiaomi 17 Pro Max" gibi marka adını zaten içeren modellerde prefix tekrar eklenmez
-    const name = model.toLowerCase().startsWith(`${prefix} `) ? model : `${prefix} ${model}`;
-    return name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
-  };
+  useEffect(() => {
+    setSelectedSlogan((prev) => (sloganPool.includes(prev) ? prev : sloganPool[0] ?? ""));
+  }, [sloganPool]);
 
   type MockImage = { filename: string; url: string; color?: string };
 
@@ -113,16 +132,15 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
   const uploadMockImage = async (image: MockImage, attempts = 3): Promise<{ imageUrl: string; imagePath: string } | null> => {
     for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
-        const imgRes = await fetch(image.url);
-        if (!imgRes.ok) throw new Error(`Mock görsel alınamadı: ${imgRes.status}`);
-        const imgBlob = await imgRes.blob();
-        const formData = new FormData();
-        formData.append("image", imgBlob, image.filename);
-
-        const uploadRes = await fetch("/api/upload", { method: "POST", body: formData });
-        const uploadData = await uploadRes.json();
-        if (!uploadData.ok) throw new Error(uploadData.error || "Upload başarısız");
-        return { imageUrl: uploadData.imageUrl, imagePath: uploadData.imagePath };
+        // Görsel telefona indirilip geri yüklenmez: sunucu mock-image/ klasöründen uploads/ altına kopyalar
+        const copyRes = await fetch("/api/mock-images/copy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: image.url }),
+        });
+        const copyData = await copyRes.json();
+        if (!copyData.ok) throw new Error(copyData.error || "Görsel kopyalanamadı");
+        return { imageUrl: copyData.imageUrl, imagePath: copyData.imagePath };
       } catch {
         if (attempt === attempts) return null;
       }
@@ -144,6 +162,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
       setBulkProgress({ current: 0, total });
       const newDrafts: { draft: ListingDraft; preview: string | null }[] = [];
       const uploadedCache = new Map<number, { imageUrl: string; imagePath: string }>();
+      const uniqueSlogans = getUniqueSlogansForCount(sloganPool, total, selectedSlogan);
       let missingImageCount = 0;
 
       for (let i = 0; i < total; i++) {
@@ -159,13 +178,14 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
           }
         }
 
-        const currentSlogan = SLOGANS[i % SLOGANS.length];
         const currentTown = TOWNS[i % TOWNS.length];
+        const currentStorage = getStorageForModel(selectedModel);
 
         const rawPrice = priceMin + Math.floor(Math.random() * (priceMax - priceMin + 1));
         const price = Math.round(rawPrice / 10) * 10;
 
-        const listingName = `${currentSlogan} ${selectedModel} 256 GB`.toUpperCase();
+        const slogan = uniqueSlogans[i] ?? `${selectedSlogan || sloganPool[0] || "SIFIR"} ${i + 1}`;
+        const listingName = buildListingTitle(slogan, selectedModel, currentStorage, undefined, selectedCondition);
 
         const draft: ListingDraft = {
           _id: `bulk_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 5)}`,
@@ -177,13 +197,13 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
           product: selectedModel,
           productType: "Akıllı Telefon",
           vehicleType: selectedBrand,
-          condition: "Sıfır",
+          condition: selectedCondition || "Sıfır",
           category: "Cep Telefonu",
           partCategory: selectedModel,
           price,
           description: DEFAULT_DESCRIPTION,
           color: images[imgIndex]?.color ?? (selectedColor || undefined),
-          storage: "256 GB",
+          storage: currentStorage,
           town: currentTown,
           imageUrl: uploaded?.imageUrl ?? "",
           imagePath: uploaded?.imagePath ?? "",
@@ -234,6 +254,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
       const total = shuffled.length;
       setQuickProgress({ current: 0, total });
       const newDrafts: { draft: ListingDraft; preview: string | null }[] = [];
+      const uniqueSlogans = getUniqueSlogansForCount(sloganPool, total, selectedSlogan);
       let successCount = 0;
 
       for (let i = 0; i < total; i++) {
@@ -244,13 +265,14 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
           continue;
         }
 
-        const currentSlogan = SLOGANS[i % SLOGANS.length];
         const currentTown = TOWNS[i % TOWNS.length];
+        const currentStorage = getStorageForModel(selectedModel);
 
         const rawPrice = priceMin + Math.floor(Math.random() * (priceMax - priceMin + 1));
         const price = Math.round(rawPrice / 10) * 10;
 
-        const listingName = `${currentSlogan} ${selectedModel} 256 GB`.toUpperCase();
+        const slogan = uniqueSlogans[i] ?? `${selectedSlogan || sloganPool[0] || "SIFIR"} ${i + 1}`;
+        const listingName = buildListingTitle(slogan, selectedModel, currentStorage, undefined, selectedCondition);
 
         const draft: ListingDraft = {
           _id: `quick_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 5)}`,
@@ -262,13 +284,13 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
           product: selectedModel,
           productType: "Akıllı Telefon",
           vehicleType: selectedBrand,
-          condition: "Sıfır",
+          condition: selectedCondition || "Sıfır",
           category: "Cep Telefonu",
           partCategory: selectedModel,
           price,
           description: DEFAULT_DESCRIPTION,
           color: shuffled[i]?.color ?? (selectedColor || undefined),
-          storage: "256 GB",
+          storage: currentStorage,
           town: currentTown,
           imageUrl: uploaded.imageUrl,
           imagePath: uploaded.imagePath,
@@ -343,9 +365,26 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
                 onChange={(e) => setSelectedSlogan(e.target.value)}
                 className={selectBase}
               >
-                {SLOGANS.map(s => (
+                {sloganPool.map(s => (
                   <option key={s} value={s} className="bg-zinc-900">{s}</option>
                 ))}
+              </select>
+              <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 pointer-events-none" />
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <label className="text-[11px] font-bold uppercase tracking-widest text-zinc-500 flex items-center gap-2">
+              <Smartphone className="w-3.5 h-3.5" /> Durum
+            </label>
+            <div className="relative">
+              <select
+                value={selectedCondition}
+                onChange={(e) => setSelectedCondition(e.target.value)}
+                className={selectBase}
+              >
+                <option value="Sıfır" className="bg-zinc-900">Sıfır</option>
+                <option value="İkinci El" className="bg-zinc-900">İkinci El</option>
               </select>
               <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 pointer-events-none" />
             </div>
@@ -361,7 +400,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
                 onChange={(e) => handleBrandChange(e.target.value)}
                 className={selectBase}
               >
-                {BRANDS.map(b => (
+                {activeBrands.map(b => (
                   <option key={b.name} value={b.name} className="bg-zinc-900">{b.name}</option>
                 ))}
               </select>
@@ -379,8 +418,8 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
                 onChange={(e) => handleModelChange(e.target.value)}
                 className={selectBase}
               >
-                {BRANDS.find(b => b.name === selectedBrand)?.models.map(m => (
-                  <option key={m} value={m} className="bg-zinc-900">{m}</option>
+                {activeBrands.find(b => b.name === selectedBrand)?.models.filter(m => m.active).map(m => (
+                  <option key={m.name} value={m.name} className="bg-zinc-900">{m.name}</option>
                 ))}
               </select>
               <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 pointer-events-none" />
@@ -444,7 +483,13 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
           </div>
           <div className="space-y-2">
             <p className="text-xs text-zinc-400">
-              Oluşturulacak Başlık: <span className="text-[#11F08E] font-bold">{selectedSlogan} {selectedModel} 256 GB</span>
+              Oluşturulacak Başlık:{" "}
+              <span className="text-[#11F08E] font-bold">
+                {buildListingTitle(selectedSlogan, selectedModel, modelStorage, undefined, selectedCondition)}
+              </span>
+            </p>
+            <p className="text-xs text-zinc-400">
+              Durum: <span className="text-white font-bold">{selectedCondition || "Sıfır"}</span>
             </p>
             <p className="text-[10px] text-zinc-500 leading-relaxed italic">
               Fiyat aralığı: <span className="text-white font-bold">{priceMin.toLocaleString("tr-TR")} — {priceMax.toLocaleString("tr-TR")} TL</span>. İlçeler alfabetik sırayla otomatik atanır.
@@ -456,7 +501,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
       <div className="p-6 border-t border-white/5 bg-white/[0.01] space-y-3">
         <button
           onClick={handleBulkAdd}
-          disabled={bulkAdding || quickAdding}
+          disabled={bulkAdding || quickAdding || !selectedBrand || !selectedModel}
           className="w-full flex items-center justify-center gap-3 py-4 rounded-xl bg-[#11F08E] text-[#0d1117] hover:bg-[#0fd880] active:scale-[0.98] transition-all font-black text-sm uppercase tracking-widest shadow-[0_10px_30px_rgba(17,240,142,0.2)] disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {bulkAdding ? (
@@ -470,7 +515,7 @@ export function BulkAddModal({ onAdd, onClose }: BulkAddModalProps) {
         </button>
         <button
           onClick={handleQuickAdd}
-          disabled={quickAdding || bulkAdding}
+          disabled={quickAdding || bulkAdding || !selectedBrand || !selectedModel}
           className="w-full flex items-center justify-center gap-3 py-3.5 rounded-xl bg-gradient-to-r from-violet-600 to-purple-600 text-white hover:from-violet-500 hover:to-purple-500 active:scale-[0.98] transition-all font-black text-sm uppercase tracking-widest shadow-[0_10px_30px_rgba(139,92,246,0.25)] disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {quickAdding ? (

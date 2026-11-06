@@ -12,11 +12,15 @@ export async function GET(
     return NextResponse.json({ error: "Invalid filename" }, { status: 400 });
   }
 
+  const ext = path.extname(filename).toLowerCase();
+  if (![".jpg", ".jpeg", ".png", ".gif", ".webp"].includes(ext)) {
+    return NextResponse.json({ error: "Invalid filename" }, { status: 400 });
+  }
+
   const filePath = path.join(process.cwd(), "mock-image", filename);
 
   try {
     const buffer = await readFile(filePath);
-    const ext = path.extname(filename).toLowerCase();
     const contentType =
       ext === ".png" ? "image/png" :
       ext === ".gif" ? "image/gif" :

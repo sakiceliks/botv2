@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-import { getUserDataDir, readBrowserSession, resolveChromeExecutable, writeBrowserSession } from "@/lib/browser";
+import { BROWSER_LAUNCH_FLAGS, getUserDataDir, readBrowserSession, resolveChromeExecutable, writeBrowserSession } from "@/lib/browser";
 
 type BrowserLaunchMode = "home" | "login" | "post-ad";
 const REMOTE_DEBUGGING_PORT = 9222;
@@ -77,6 +77,7 @@ export async function openChromeSession(mode: BrowserLaunchMode) {
       `--user-data-dir=${userDataDir}`,
       `--remote-debugging-port=${REMOTE_DEBUGGING_PORT}`,
       "--start-maximized",
+      ...BROWSER_LAUNCH_FLAGS,
       targetUrl
     ],
     {

@@ -1,0 +1,500 @@
+{
+  "version": 1,
+  "colors": [
+    {
+      "name": "Bej",
+      "hex": "#d9c3a9"
+    },
+    {
+      "name": "Beyaz",
+      "hex": "#f4f4f5"
+    },
+    {
+      "name": "Bordo",
+      "hex": "#7f1d1d"
+    },
+    {
+      "name": "Gri",
+      "hex": "#9ca3af"
+    },
+    {
+      "name": "Gümüş",
+      "hex": "#c4c7cc"
+    },
+    {
+      "name": "Lacivert",
+      "hex": "#1e3a8a"
+    },
+    {
+      "name": "Mor",
+      "hex": "#9333ea"
+    },
+    {
+      "name": "Siyah",
+      "hex": "#27272a"
+    },
+    {
+      "name": "Turuncu",
+      "hex": "#f97316"
+    },
+    {
+      "name": "Yeşil",
+      "hex": "#16a34a"
+    }
+  ],
+  "brands": [
+    {
+      "id": "b_apple",
+      "name": "Apple",
+      "slugPrefix": "iphone",
+      "active": true,
+      "models": [
+        {
+          "id": "m_b2830022-395",
+          "name": "18 Pro Max",
+          "slug": "iphone-18-pro-max",
+          "active": true,
+          "colors": [
+            "Bordo"
+          ]
+        },
+        {
+          "id": "m_ff93ef69-815",
+          "name": "18 Pro",
+          "slug": "iphone-18-pro",
+          "active": true,
+          "colors": [
+            "Bordo"
+          ]
+        },
+        {
+          "id": "m_def7eadd-325",
+          "name": "18",
+          "slug": "iphone-18",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_57fd5b7e-587",
+          "name": "Air",
+          "slug": "iphone-air",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_48fe8e5a-681",
+          "name": "Fold",
+          "slug": "iphone-fold",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_0890a86b-f55",
+          "name": "17 Pro Max",
+          "slug": "iphone-17-pro-max",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_5dae8b91-5b3",
+          "name": "17 Pro",
+          "slug": "iphone-17-pro",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_58d48b96-1c8",
+          "name": "17",
+          "slug": "iphone-17",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_47c4c8d2-245",
+          "name": "17e",
+          "slug": "iphone-17e",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_31725941-5c7",
+          "name": "16 Pro Max",
+          "slug": "iphone-16-pro-max",
+          "active": true,
+          "colors": [
+            "Bej",
+            "Beyaz",
+            "Gri",
+            "Siyah"
+          ]
+        },
+        {
+          "id": "m_5fa816ab-da1",
+          "name": "16 Pro",
+          "slug": "iphone-16-pro",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_a70d87b9-adb",
+          "name": "16 Plus",
+          "slug": "iphone-16-plus",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_8692fa9f-02a",
+          "name": "16",
+          "slug": "iphone-16",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_fd5bbc25-507",
+          "name": "16e",
+          "slug": "iphone-16e",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_9ee25829-45b",
+          "name": "15 Pro Max",
+          "slug": "iphone-15-pro-max",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_29255b43-e4e",
+          "name": "15 Pro",
+          "slug": "iphone-15-pro",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_6d3019e6-973",
+          "name": "15 Plus",
+          "slug": "iphone-15-plus",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_de2bf906-d54",
+          "name": "15",
+          "slug": "iphone-15",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_bfa501bc-cc6",
+          "name": "14 Pro Max",
+          "slug": "iphone-14-pro-max",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_b9685a0e-3e2",
+          "name": "14 Pro",
+          "slug": "iphone-14-pro",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_e0c3c04b-f6d",
+          "name": "14 Plus",
+          "slug": "iphone-14-plus",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_ac7af618-1c9",
+          "name": "14",
+          "slug": "iphone-14",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_69149233-559",
+          "name": "13 Pro Max",
+          "slug": "iphone-13-pro-max",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_97529834-f98",
+          "name": "13 Pro",
+          "slug": "iphone-13-pro",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_b34ab2b8-26b",
+          "name": "13",
+          "slug": "iphone-13",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_198caccc-d37",
+          "name": "13 mini",
+          "slug": "iphone-13-mini",
+          "active": true,
+          "colors": []
+        }
+      ]
+    },
+    {
+      "id": "b_samsung",
+      "name": "Samsung",
+      "slugPrefix": "samsung",
+      "active": true,
+      "models": [
+        {
+          "id": "m_d413d952-05a",
+          "name": "Galaxy S26 Ultra",
+          "slug": "samsung-galaxy-s26-ultra",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_647392a7-ca2",
+          "name": "Galaxy S26+",
+          "slug": "samsung-galaxy-s26",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_e87dafb1-6d8",
+          "name": "Galaxy S26",
+          "slug": "samsung-galaxy-s26",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_1a0d5b7f-2aa",
+          "name": "Galaxy S25 Ultra",
+          "slug": "samsung-galaxy-s25-ultra",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_a1184534-c25",
+          "name": "Galaxy S25+",
+          "slug": "samsung-galaxy-s25",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_eb43eec0-d5d",
+          "name": "Galaxy S25",
+          "slug": "samsung-galaxy-s25",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_bf74be72-fda",
+          "name": "Galaxy S25 Edge",
+          "slug": "samsung-galaxy-s25-edge",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_8d45fc6a-c22",
+          "name": "Galaxy S25 FE",
+          "slug": "samsung-galaxy-s25-fe",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_68b72b1f-3c6",
+          "name": "Galaxy Z Fold 8",
+          "slug": "samsung-galaxy-z-fold-8",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_6b793e04-547",
+          "name": "Galaxy Z Flip 8",
+          "slug": "samsung-galaxy-z-flip-8",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_9f20d237-5d4",
+          "name": "Galaxy Z Fold 7",
+          "slug": "samsung-galaxy-z-fold-7",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_7b1434a4-3b7",
+          "name": "Galaxy Z Flip 7",
+          "slug": "samsung-galaxy-z-flip-7",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_13453183-b4f",
+          "name": "Galaxy A57",
+          "slug": "samsung-galaxy-a57",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_e75d7c0f-aa1",
+          "name": "Galaxy A37",
+          "slug": "samsung-galaxy-a37",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_d41ade61-68c",
+          "name": "Galaxy A56",
+          "slug": "samsung-galaxy-a56",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_39a84322-c27",
+          "name": "Galaxy A36",
+          "slug": "samsung-galaxy-a36",
+          "active": true,
+          "colors": []
+        }
+      ]
+    },
+    {
+      "id": "b_xiaomi",
+      "name": "Xiaomi",
+      "slugPrefix": "xiaomi",
+      "active": true,
+      "models": [
+        {
+          "id": "m_47b329c6-e14",
+          "name": "Xiaomi 17 Ultra",
+          "slug": "xiaomi-17-ultra",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_705113a4-17c",
+          "name": "Xiaomi 17 Pro Max",
+          "slug": "xiaomi-17-pro-max",
+          "active": true,
+          "colors": [
+            "Siyah",
+            "Beyaz",
+            "Mor",
+            "Yeşil"
+          ]
+        },
+        {
+          "id": "m_72f85180-c90",
+          "name": "Xiaomi 17 Pro",
+          "slug": "xiaomi-17-pro",
+          "active": true,
+          "colors": [
+            "Yeşil"
+          ]
+        },
+        {
+          "id": "m_847f766c-db4",
+          "name": "Xiaomi 17",
+          "slug": "xiaomi-17",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_dad545d1-809",
+          "name": "Xiaomi 15T Pro",
+          "slug": "xiaomi-15t-pro",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_9f9604ce-0d1",
+          "name": "Xiaomi 15T",
+          "slug": "xiaomi-15t",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_4f160c4b-afc",
+          "name": "Xiaomi 15 Ultra",
+          "slug": "xiaomi-15-ultra",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_ae22cef4-6cb",
+          "name": "Xiaomi 15",
+          "slug": "xiaomi-15",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_e2c9dd86-66b",
+          "name": "Redmi Note 15 Pro+",
+          "slug": "xiaomi-redmi-note-15-pro",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_619badf1-8c7",
+          "name": "Redmi Note 15 Pro",
+          "slug": "xiaomi-redmi-note-15-pro",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_c56a682c-4f7",
+          "name": "Redmi Note 15",
+          "slug": "xiaomi-redmi-note-15",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_1e38c42d-928",
+          "name": "Redmi Note 14 Pro+",
+          "slug": "xiaomi-redmi-note-14-pro",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_b6c832b9-8bf",
+          "name": "Redmi Note 14 Pro",
+          "slug": "xiaomi-redmi-note-14-pro",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_57d80a3f-02f",
+          "name": "Redmi 15C",
+          "slug": "xiaomi-redmi-15c",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_5219a1ef-370",
+          "name": "Poco F7 Pro",
+          "slug": "xiaomi-poco-f7-pro",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_b31c59d2-845",
+          "name": "Poco F7",
+          "slug": "xiaomi-poco-f7",
+          "active": true,
+          "colors": []
+        },
+        {
+          "id": "m_8f553db4-539",
+          "name": "Poco X7 Pro",
+          "slug": "xiaomi-poco-x7-pro",
+          "active": true,
+          "colors": []
+        }
+      ]
+    }
+  ]
+}

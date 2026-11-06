@@ -2,6 +2,7 @@ import slugify from "slugify";
 import { z } from "zod";
 
 import { DEFAULT_CONDITION } from "@/lib/catalog";
+import { withInstallmentEmphasis } from "@/lib/manual-data";
 import type { ListingDraft, ListingFieldConfidence } from "@/lib/types";
 
 const RawGroqDraftSchema = z.object({
@@ -63,7 +64,7 @@ export function normalizeListingDraft(input: unknown, context: { imageUrl: strin
   const series = (raw.series ?? "").trim() || model;
   const productType = (raw.productType ?? "").trim() || product;
   const condition = (raw.condition ?? "").trim() || DEFAULT_CONDITION;
-  const name = buildListingName(brand, model, product);
+  const name = withInstallmentEmphasis(buildListingName(brand, model, product));
   const slug = slugify(name, { lower: true, strict: true, locale: "tr" });
 
   if (fieldConfidence.brand < 0.65) warnings.push("Marka dusuk guvenle tespit edildi.");

@@ -11,7 +11,6 @@ import {
   motion,
 } from "framer-motion";
 import {
-  RotateCcw,
   CheckCircle2,
   AlertCircle,
   X,
@@ -19,87 +18,250 @@ import {
   History,
   Layers,
   Plus,
-  MessageSquare,
   ChevronLeft,
   ChevronRight,
+  Boxes,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
 import type { ListingDraft } from "@/lib/types";
+import { getStorageForModel, withInstallmentEmphasis } from "@/lib/manual-data";
 import SplashScreen from "./components/SplashScreen";
 import { ManualListingForm } from "./components/ManualListingForm";
 import { BulkAddModal } from "./components/BulkAddModal";
 import { PublishQueue } from "./components/PublishQueue";
 import type { QueueItem } from "./components/PublishQueue";
 import { SahibindenAuthStatus } from "./components/SahibindenAuthStatus";
-import { WhatsAppDashboard } from "./components/WhatsAppDashboard";
+import { PublishHistory } from "./components/PublishHistory";
 import { BotSettings } from "./components/BotSettings";
+import { CatalogManager } from "./components/CatalogManager";
 import MobileNavigation from "./components/Navigation";
+
+const STORAGE_IN_TITLE_RE = /\b(?:64|128|256|512)\s*GB\b|\b(?:1|2)\s*TB\b/i;
+
+function normalizeQueueDraft(draft: ListingDraft): ListingDraft {
+  const expectedStorage = getStorageForModel(draft.model);
+  const nameWithStorage = expectedStorage && draft.storage !== expectedStorage && STORAGE_IN_TITLE_RE.test(draft.name)
+    ? draft.name.replace(STORAGE_IN_TITLE_RE, expectedStorage)
+    : draft.name;
+  const name = withInstallmentEmphasis(nameWithStorage);
+  if (name === draft.name && (!expectedStorage || draft.storage === expectedStorage)) return draft;
+
+  return {
+    ...draft,
+    name,
+    slug: name.toLowerCase().replace(/\s+/g, "-"),
+    storage: expectedStorage ?? draft.storage,
+  };
+}
+
+// ── Sunucu kuyruk motoru durumu (GET /api/queue/status) ──────────────────────────────────
+type RunStatus = "idle" | "running" | "stopping" | "paused_login";
+type RunInfo = {
+  status: RunStatus;
+  active: boolean;
+  stale: boolean;
+  ownedHere: boolean;
+  ownerLabel: string | null;
+  currentQueueId: string | null;
+  currentTitle: string | null;
+  processed: number;
+  success: number;
+  failed: number;
+  stopRequested: boolean;
+  message: string | null;
+  lastError: string | null;
+  heartbeatAgeSec: number | null;
+};
+
+type QueueRecord = {
+  queueId: string;
+  draft: ListingDraft;
+  preview?: string | null;
+  status: QueueItem["status"];
+  errorMsg?: string | null;
+  addedAt?: string;
+  duration?: string | null;
+  updatedAt?: string;
+};
+
+const POLL_ACTIVE_MS = 3000;
+const POLL_IDLE_MS = 5000;
+
+// Değişen taslak alanlarını (öğe bazlı PATCH için) çıkarır
+function draftDiff(before: ListingDraft, after: ListingDraft): Partial<ListingDraft> {
+  const diff: Record<string, unknown> = {};
+  for (const key of Object.keys(after) as (keyof ListingDraft)[]) {
+    if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) diff[key] = after[key];
+  }
+  return diff as Partial<ListingDraft>;
+}
 
 export default function Home() {
   // ── States ──────────────────────────────────────────────────────────────────
   const [queueItems, setQueueItems] = useState<QueueItem[]>([]);
   const [queueLoading, setQueueLoading] = useState(true);
-  const [queueRunning, setQueueRunning] = useState(false);
-  const [queueCurrentIndex, setQueueCurrentIndex] = useState<number | null>(null);
+  const [runInfo, setRunInfo] = useState<RunInfo | null>(null);
+  const [runLogs, setRunLogs] = useState<string[]>([]);
+  const [showRunLogs, setShowRunLogs] = useState(false);
+  const [starting, setStarting] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isBulkModalOpen, setIsBulkModalOpen] = useState(false);
   const [isMounted, setIsMounted] = useState(false);
-  const [activeView, setActiveView] = useState<"queue" | "whatsapp" | "settings">("queue");
+  const [activeView, setActiveView] = useState<"queue" | "history" | "settings" | "catalog">("queue");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
-  const queueAbortRef = useRef(false);
   const queueItemsRef = useRef<QueueItem[]>([]);
   queueItemsRef.current = queueItems;
 
-  // ── Persistence ─────────────────────────────────────────────────────────────
-  useEffect(() => {
-    setIsMounted(true);
-    const fetchQueue = async () => {
-      setQueueLoading(true);
-      try {
-        const res = await fetch("/api/queue");
-        const data = await res.json();
-        if (data.ok) {
-          const mappedItems = data.items.map((it: any) => ({
-            id: it.queueId,
-            draft: it.draft,
-            preview: it.preview,
-            status: it.status,
-            errorMsg: it.errorMsg,
-            addedAt: it.addedAt,
-            duration: it.duration
-          }));
-          setQueueItems(mappedItems);
-        }
-      } catch (err) {
-        console.error("[DB] ❌ Kuyruk yükleme hatası:", err);
-      } finally {
-        setQueueLoading(false);
-      }
-    };
-    fetchQueue();
+  // Kuyruk yazan istekler sürerken polling sonucu uygulanmaz (iyimser güncellemeyi geri almasın)
+  const mutationsInFlight = useRef(0);
+  const lastItemsSig = useRef("");
+  const prevStatuses = useRef<Map<string, QueueItem["status"]>>(new Map());
+  const prevRunStatus = useRef<RunStatus | null>(null);
+  const normalizedSent = useRef<Set<string>>(new Set());
+  const runActiveRef = useRef(false);
+
+  const queueRunning = Boolean(runInfo?.active);
+  runActiveRef.current = queueRunning;
+  const queueCurrentIndex = (() => {
+    if (!runInfo?.currentQueueId) return null;
+    const idx = queueItems.findIndex((i) => i.id === runInfo.currentQueueId);
+    return idx >= 0 ? idx : null;
+  })();
+
+  // Kuyruk yazan bir isteği izler (polling çakışmasın diye sayaç tutar)
+  const tracked = useCallback(async <T,>(fn: () => Promise<T>): Promise<T> => {
+    mutationsInFlight.current++;
+    try {
+      return await fn();
+    } finally {
+      mutationsInFlight.current--;
+    }
   }, []);
 
-  // Auto-sync to DB
-  useEffect(() => {
-    if (!isMounted || queueItems.length === 0) return;
-    
-    const syncQueue = async () => {
-      try {
-        await fetch("/api/queue", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items: queueItems })
-        });
-      } catch (err) {
-        console.error("[DB] ❌ Kuyruk senkronizasyon hatası:", err);
+  const jsonRequest = useCallback(
+    async (method: "POST" | "PATCH" | "DELETE", body: unknown) => {
+      const res = await fetch("/api/queue", {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) {
+        const error = new Error(data?.error || `İstek başarısız (${res.status})`) as Error & { status?: number };
+        error.status = res.status;
+        throw error;
       }
-    };
+      return data;
+    },
+    []
+  );
 
-    const timer = setTimeout(syncQueue, 1000);
-    return () => clearTimeout(timer);
-  }, [queueItems, isMounted]);
+  // ── Sunucudan kuyruk + motor durumu (polling) ────────────────────────────────
+  const pollOnce = useCallback(async (initial = false) => {
+    if (!initial && mutationsInFlight.current > 0) return;
+    try {
+      const [queueRes, statusRes] = await Promise.all([
+        fetch("/api/queue", { cache: "no-store" }),
+        fetch("/api/queue/status", { cache: "no-store" }),
+      ]);
+      const queueData = await queueRes.json();
+      const statusData = await statusRes.json().catch(() => null);
+      if (!initial && mutationsInFlight.current > 0) return;
+
+      if (queueData.ok) {
+        const records: QueueRecord[] = queueData.items;
+        const sig = records.map((r) => `${r.queueId}|${r.status}|${r.updatedAt ?? ""}`).join(";");
+        if (sig !== lastItemsSig.current) {
+          lastItemsSig.current = sig;
+          const mapped: QueueItem[] = records.map((it) => {
+            const draft = normalizeQueueDraft(it.draft);
+            // Eski kayıtlarda kalan normalizasyon farkını sunucuya bir kez yaz
+            if (draft !== it.draft && (it.status === "pending" || it.status === "error")) {
+              const key = `${it.queueId}|${draft.name}`;
+              if (!normalizedSent.current.has(key)) {
+                normalizedSent.current.add(key);
+                jsonRequest("PATCH", { id: it.queueId, patch: { draft: draftDiff(it.draft, draft) } }).catch(() =>
+                  normalizedSent.current.delete(key)
+                );
+              }
+            }
+            return {
+              id: it.queueId,
+              draft,
+              preview: it.preview ?? undefined,
+              status: it.status,
+              errorMsg: it.errorMsg ?? undefined,
+              addedAt: it.addedAt ?? "",
+              duration: it.duration ?? undefined,
+            };
+          });
+
+          // Sunucudaki yayın sonuçlarını (başka cihazdan/arka planda) bildir
+          for (const item of mapped) {
+            const before = prevStatuses.current.get(item.id);
+            if (before === "running" && item.status === "done") {
+              toast.success("İlan başarıyla yüklendi", { description: `${item.draft.name}${item.duration ? ` (${item.duration})` : ""}` });
+            } else if (before === "running" && item.status === "error") {
+              toast.error("Yayınlama hatası", { description: item.errorMsg || item.draft.name });
+            }
+          }
+          prevStatuses.current = new Map(mapped.map((i) => [i.id, i.status]));
+          setQueueItems(mapped);
+        }
+      }
+
+      if (statusData?.ok) {
+        const run: RunInfo = statusData.run;
+        const before = prevRunStatus.current;
+        if (before && before !== run.status) {
+          if (run.status === "paused_login") {
+            toast.warning("Giriş gerekli", { description: "Sahibinden oturumu kapalı — giriş yapıp “Devam Et”e basın." });
+          } else if (run.status === "idle" && (before === "running" || before === "stopping")) {
+            toast.info(before === "stopping" ? "Kuyruk durduruldu" : "Kuyruk tamamlandı");
+          }
+        }
+        prevRunStatus.current = run.status;
+        setRunInfo(run);
+        setRunLogs(statusData.logs ?? []);
+      }
+    } catch (err) {
+      if (initial) console.error("[DB] ❌ Kuyruk yükleme hatası:", err);
+    } finally {
+      if (initial) setQueueLoading(false);
+    }
+  }, [jsonRequest]);
+
+  useEffect(() => {
+    setIsMounted(true);
+    pollOnce(true);
+  }, [pollOnce]);
+
+  // Sekme görünürken 3–5 sn'de bir yokla; görünmezken dur, geri gelince hemen yenile.
+  // (Kuyruk sunucuda ilerlediği için sekmenin açık olması gerekmez.)
+  useEffect(() => {
+    if (!isMounted) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    const schedule = () => {
+      timer = setTimeout(async () => {
+        if (cancelled) return;
+        if (document.visibilityState === "visible") await pollOnce();
+        if (!cancelled) schedule();
+      }, runActiveRef.current ? POLL_ACTIVE_MS : POLL_IDLE_MS);
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") pollOnce();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    schedule();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [isMounted, pollOnce]);
 
   // ── Escape key closes modals ─────────────────────────────────────────────────
   useEffect(() => {
@@ -113,209 +275,121 @@ export default function Home() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isModalOpen, isBulkModalOpen]);
 
-  // ── Queue Handlers ──────────────────────────────────────────────────────────
-  const addToQueue = useCallback((draft: ListingDraft, preview: string | null) => {
-    const item: QueueItem = {
-      id: `q_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      draft,
-      preview,
-      status: "pending",
-      addedAt: new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" }),
-    };
-    console.log("[QUEUE] ➕ İlan kuyruğa eklendi:", draft.name);
-    setQueueItems((prev) => [...prev, item]);
-  }, []);
+  // ── Queue Handlers (öğe bazlı: tüm kuyruk yazılmaz) ──────────────────────────
+  const addItemsToQueue = useCallback(
+    (entries: { draft: ListingDraft; preview: string | null }[]) => {
+      const items: QueueItem[] = entries.map(({ draft, preview }) => ({
+        id: `q_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        draft: normalizeQueueDraft(draft),
+        preview,
+        status: "pending",
+        addedAt: new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" }),
+      }));
+      for (const item of items) console.log("[QUEUE] ➕ İlan kuyruğa eklendi:", item.draft.name);
+      setQueueItems((prev) => [...prev, ...items]);
+      tracked(() =>
+        jsonRequest("POST", {
+          items: items.map((i) => ({ id: i.id, draft: i.draft, preview: i.preview ?? null, addedAt: i.addedAt })),
+        })
+      )
+        .catch((err) => {
+          console.error("[QUEUE] Ekleme sync hatası:", err);
+          toast.error("İlan sunucuya kaydedilemedi", { description: err instanceof Error ? err.message : undefined });
+          const ids = new Set(items.map((i) => i.id));
+          setQueueItems((prev) => prev.filter((i) => !ids.has(i.id)));
+        })
+        .finally(() => pollOnce());
+    },
+    [jsonRequest, pollOnce, tracked]
+  );
+
+  const addToQueue = useCallback(
+    (draft: ListingDraft, preview: string | null) => addItemsToQueue([{ draft, preview }]),
+    [addItemsToQueue]
+  );
 
   const removeFromQueue = useCallback((id: string) => {
     const item = queueItemsRef.current.find(i => i.id === id);
     console.log("[QUEUE] ➖ İlan kuyruktan kaldırıldı:", item?.draft.name);
     setQueueItems((prev) => prev.filter((item) => item.id !== id));
-    fetch("/api/queue", {
-      method: "DELETE",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
-    }).catch((err) => console.error("[QUEUE] Silme sync hatası:", err));
-  }, []);
+    tracked(() => jsonRequest("DELETE", { id }))
+      .catch((err) => {
+        console.error("[QUEUE] Silme sync hatası:", err);
+        toast.error("İlan silinemedi", { description: err instanceof Error ? err.message : undefined });
+      })
+      .finally(() => pollOnce());
+  }, [jsonRequest, pollOnce, tracked]);
 
   const updateQueueItem = useCallback((id: string, patch: Partial<ListingDraft>) => {
+    const current = queueItemsRef.current.find((i) => i.id === id);
+    if (!current) return;
     console.log("[QUEUE] 📝 İlan güncellendi:", id, patch);
-    setQueueItems((prev) =>
-      prev.map((item) =>
-        item.id === id ? { ...item, draft: { ...item.draft, ...patch } } : item
-      )
-    );
-  }, []);
+    const nextDraft = normalizeQueueDraft({ ...current.draft, ...patch });
+    const changed = draftDiff(current.draft, nextDraft);
+    setQueueItems((prev) => prev.map((item) => (item.id === id ? { ...item, draft: nextDraft } : item)));
+    if (Object.keys(changed).length === 0) return;
+    tracked(() => jsonRequest("PATCH", { id, patch: { draft: changed } }))
+      .catch((err) => {
+        console.error("[QUEUE] Güncelleme sync hatası:", err);
+        toast.error("Değişiklik kaydedilemedi", { description: err instanceof Error ? err.message : undefined });
+      })
+      .finally(() => pollOnce());
+  }, [jsonRequest, pollOnce, tracked]);
 
   const handleReset = useCallback(async () => {
     if (window.confirm("Kuyruğu tamamen temizlemek istediğine emin misin?")) {
       console.log("[SYSTEM] 🔄 Sistem sıfırlanıyor...");
       try {
-        await fetch("/api/queue", {
-          method: "DELETE",
-          body: JSON.stringify({ clearAll: true })
-        });
-        setQueueItems([]);
-        setQueueCurrentIndex(null);
-        setQueueRunning(false);
-        toast.success("Sistem ve Veritabanı sıfırlandı");
+        const data = await tracked(() => jsonRequest("DELETE", { clearAll: true }));
+        // Yayınlanmakta olan ilan silinmez; listeyi sunucudan yeniden al
+        lastItemsSig.current = "";
+        await pollOnce();
+        toast.success(data.keptRunning > 0 ? "Kuyruk temizlendi (yayınlanan ilan hariç)" : "Sistem ve Veritabanı sıfırlandı");
       } catch (err) {
         toast.error("Sıfırlama hatası");
       }
     }
-  }, []);
+  }, [jsonRequest, pollOnce, tracked]);
 
-  // ── Queue Execution Logic ───────────────────────────────────────────────────
+  // ── Queue Execution: döngü artık SUNUCUDA (lib/queue-engine.ts) ──────────────────
   const startQueue = async () => {
-    if (queueRunning) return;
-    queueAbortRef.current = false;
-    setQueueRunning(true);
-    console.log("[BOT] 🚀 Kuyruk başlatıldı");
-
-    let maxRetries = 2;
-    let telegramInterval = 10;
+    if (starting || queueRunning) return;
+    setStarting(true);
     try {
-      const settingsRes = await fetch("/api/settings");
-      const settingsData = await settingsRes.json();
-      if (settingsData.ok) {
-        if (settingsData.settings?.maxRetries != null) {
-          maxRetries = settingsData.settings.maxRetries;
-        }
-        if (settingsData.settings?.telegramNotifyInterval) {
-          telegramInterval = settingsData.settings.telegramNotifyInterval;
-        }
+      const res = await fetch("/api/queue/run", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (data?.ok === false) {
+        toast.error("Kuyruk başlatılamadı", { description: data.message || data.error });
+      } else if (data?.started === false && data?.reason === "empty") {
+        toast.info("Kuyrukta yayınlanacak ilan yok");
+      } else if (data?.started) {
+        console.log("[BOT] 🚀 Kuyruk sunucuda başlatıldı");
+        toast.success("Kuyruk sunucuda başladı", { description: "Bu sekmeyi kapatsanız da devam eder." });
       }
-    } catch { /* use default */ }
-
-    let items = [...queueItemsRef.current];
-    let batchSuccessCount = 0;
-    let batchErrorCount = 0;
-    let batchProcessed = 0;
-    let batchNumber = 0;
-    const batchErrorDetails: string[] = [];
-
-    for (let i = 0; i < items.length; i++) {
-      if (queueAbortRef.current) {
-        console.log("[BOT] 🛑 Kuyruk kullanıcı tarafından durduruldu");
-        break;
-      }
-      if (items[i].status === "done" || items[i].status === "running") continue;
-
-      setQueueCurrentIndex(i);
-      setQueueItems((prev) =>
-        prev.map((it, idx) => (idx === i ? { ...it, status: "running" } : it))
-      );
-
-      console.log(`[BOT] 🛠 İşleniyor (${i + 1}/${items.length}):`, items[i].draft.name);
-      const startTime = Date.now();
-
-      let lastError: string | undefined;
-      let success = false;
-
-      for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        if (queueAbortRef.current) break;
-
-        if (attempt > 0) {
-          console.log(`[BOT] 🔄 Yeniden deneniyor (${attempt}/${maxRetries}):`, items[i].draft.name);
-          const delay = attempt * 3000;
-          await new Promise((r) => setTimeout(r, delay));
-        }
-
-        try {
-          const res = await fetch("/api/publish", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              draft: items[i].draft,
-              mode: "publish"
-            }),
-          });
-
-          const data = await res.json();
-          const duration = ((Date.now() - startTime) / 1000).toFixed(0) + "s";
-          console.log(`[API] 📡 Yanıt alındı (${items[i].draft.name}) [${duration}]:`, data);
-
-          if (data.ok) {
-            console.log(`[BOT] ✅ Başarıyla yayınlandı:`, items[i].draft.name);
-            setQueueItems((prev) =>
-              prev.map((it, idx) => (idx === i ? { ...it, status: "done", duration } : it))
-            );
-            toast.success("İlan başarıyla yüklendi", { description: `${items[i].draft.name} (${duration})` });
-            success = true;
-            batchSuccessCount++;
-            break;
-          } else {
-            lastError = data.error;
-            console.error(`[BOT] ❌ Yayınlama hatası (${items[i].draft.name}):`, data.error);
-          }
-        } catch (err) {
-          lastError = "Bağlantı hatası";
-          console.error(`[BOT] ☢️ Kritik hata (${items[i].draft.name}):`, err);
-        }
-      }
-
-      if (!success) {
-        batchErrorCount++;
-        batchErrorDetails.push(`${items[i].draft.name}: ${lastError || "Bilinmeyen hata"}`);
-        setQueueItems((prev) =>
-          prev.map((it, idx) => (idx === i ? {
-            ...it,
-            status: "error",
-            errorMsg: lastError || "Bilinmeyen hata",
-          } : it))
-        );
-        toast.error(`Yayınlama hatası (${maxRetries + 1} deneme)`, { description: lastError });
-      }
-
-      batchProcessed++;
-
-      if (batchProcessed > 0 && batchProcessed % telegramInterval === 0) {
-        batchNumber++;
-        fetch("/api/telegram/notify", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            successCount: batchSuccessCount,
-            errorCount: batchErrorCount,
-            totalProcessed: batchProcessed,
-            batchNumber,
-            errorDetails: batchErrorDetails,
-          }),
-        }).catch(() => {});
-        batchErrorDetails.length = 0;
-      }
-
-      // Wait between items
-      await new Promise((r) => setTimeout(r, 2000));
+    } catch {
+      toast.error("Kuyruk başlatılamadı", { description: "Sunucuya ulaşılamadı." });
+    } finally {
+      setStarting(false);
+      lastItemsSig.current = "";
+      await pollOnce();
     }
-
-    if (batchProcessed > 0 && batchProcessed % telegramInterval !== 0) {
-      batchNumber++;
-      fetch("/api/telegram/notify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          successCount: batchSuccessCount,
-          errorCount: batchErrorCount,
-          totalProcessed: batchProcessed,
-          batchNumber,
-          errorDetails: batchErrorDetails,
-        }),
-      }).catch(() => {});
-    }
-
-    setQueueRunning(false);
-    setQueueCurrentIndex(null);
-    console.log("[BOT] 🏁 Kuyruk işlemi tamamlandı");
   };
 
-  const stopQueue = () => {
-    queueAbortRef.current = true;
-    setQueueRunning(false);
-    setQueueCurrentIndex(null);
-    setQueueItems((prev) =>
-      prev.map((it) => (it.status === "running" ? { ...it, status: "pending" } : it))
-    );
-    toast.info("Kuyruk durduruldu");
+  const stopQueue = async () => {
+    try {
+      const res = await fetch("/api/queue/stop", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (data?.ok === false) {
+        toast.error("Kuyruk durdurulamadı", { description: data.error });
+      } else {
+        toast.info("Durdurma istendi", { description: "Mevcut ilan bittikten sonra kuyruk duracak." });
+      }
+    } catch {
+      toast.error("Kuyruk durdurulamadı", { description: "Sunucuya ulaşılamadı." });
+    } finally {
+      lastItemsSig.current = "";
+      await pollOnce();
+    }
   };
 
   if (!isMounted) return null;
@@ -374,41 +448,34 @@ export default function Home() {
             <span className={cn("text-sm font-bold whitespace-nowrap", sidebarCollapsed && "hidden")}>Yükleme Kuyruğu</span>
           </div>
 
-          <div 
-            onClick={() => setActiveView("whatsapp")}
+          <div
+            onClick={() => setActiveView("history")}
             className={cn(
               "flex items-center rounded-xl cursor-pointer transition-all",
               sidebarCollapsed ? "justify-center py-3 px-0" : "gap-3 px-4 py-3",
-              activeView === "whatsapp" 
-                ? "bg-[#11F08E]/10 text-[#11F08E] border border-[#11F08E]/20" 
+              activeView === "history"
+                ? "bg-[#11F08E]/10 text-[#11F08E] border border-[#11F08E]/20"
                 : "text-zinc-500 hover:text-zinc-300 hover:bg-white/5"
             )}
           >
-            <MessageSquare className="w-4 h-4 flex-shrink-0" />
-            <span className={cn("text-sm font-bold whitespace-nowrap", sidebarCollapsed && "hidden")}>WhatsApp AI Bot</span>
-          </div>
-
-          <div
-            onClick={() => toast.info("Tamamlananlar özelliği yakında kullanıma sunulacak.")}
-            className={cn(
-              "flex items-center rounded-xl text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer group",
-              sidebarCollapsed ? "justify-center py-3 px-0" : "gap-3 px-4 py-3"
-            )}
-          >
             <History className="w-4 h-4 flex-shrink-0" />
-            <span className={cn("text-sm font-bold whitespace-nowrap", sidebarCollapsed && "hidden")}>Tamamlananlar</span>
-          </div>
-          <div
-            onClick={() => toast.info("Log Kayıtları özelliği yakında kullanıma sunulacak.")}
-            className={cn(
-              "flex items-center rounded-xl text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-colors cursor-pointer group",
-              sidebarCollapsed ? "justify-center py-3 px-0" : "gap-3 px-4 py-3"
-            )}
-          >
-            <RotateCcw className="w-4 h-4 flex-shrink-0" />
-            <span className={cn("text-sm font-bold whitespace-nowrap", sidebarCollapsed && "hidden")}>Log Kayıtları</span>
+            <span className={cn("text-sm font-bold whitespace-nowrap", sidebarCollapsed && "hidden")}>Yayın Geçmişi</span>
           </div>
           <div className={cn("mt-8 px-4 py-2 text-[10px] font-bold text-zinc-500 uppercase tracking-widest mb-2", sidebarCollapsed && "hidden")}>Ayarlar</div>
+          <div
+            onClick={() => setActiveView("catalog")}
+            className={cn(
+              "flex items-center rounded-xl cursor-pointer transition-all",
+              sidebarCollapsed ? "justify-center py-3 px-0" : "gap-3 px-4 py-3",
+              activeView === "catalog"
+                ? "bg-[#11F08E]/10 text-[#11F08E] border border-[#11F08E]/20"
+                : "text-zinc-500 hover:text-zinc-300 hover:bg-white/5"
+            )}
+            title="Katalog Yönetimi"
+          >
+            <Boxes className="w-4 h-4 flex-shrink-0" />
+            <span className={cn("text-sm font-bold whitespace-nowrap", sidebarCollapsed && "hidden")}>Katalog</span>
+          </div>
           <div
             onClick={() => setActiveView("settings")}
             className={cn(
@@ -447,7 +514,13 @@ export default function Home() {
               <path d="M9 5l7 7-7 7" />
             </svg>
             <span className="text-xs font-bold text-zinc-100 truncate">
-              {activeView === "queue" ? "Yükleme Kuyruğu" : activeView === "whatsapp" ? "WhatsApp AI Bot" : "Bot Ayarları"}
+              {activeView === "queue"
+                ? "Yükleme Kuyruğu"
+                : activeView === "history"
+                  ? "Yayın Geçmişi"
+                  : activeView === "catalog"
+                    ? "Katalog Yönetimi"
+                    : "Bot Ayarları"}
             </span>
           </div>
 
@@ -557,13 +630,79 @@ export default function Home() {
                     <div className="bg-white/[0.02] border border-white/5 p-5 rounded-2xl shadow-sm">
                       <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Durum</p>
                       <div className="flex items-center gap-2 mt-2">
-                        <div className={cn("w-2 h-2 rounded-full", queueRunning ? "bg-amber-400 animate-pulse" : "bg-zinc-600")} />
-                        <h4 className={cn("text-lg font-black tracking-tight", queueRunning ? "text-amber-400" : "text-zinc-500")}>
-                          {queueRunning ? "Aktif" : "Beklemede"}
+                        <div className={cn(
+                          "w-2 h-2 rounded-full",
+                          runInfo?.status === "paused_login" ? "bg-red-400" : queueRunning ? "bg-amber-400 animate-pulse" : "bg-zinc-600"
+                        )} />
+                        <h4 data-testid="run-status" className={cn(
+                          "text-lg font-black tracking-tight",
+                          runInfo?.status === "paused_login" ? "text-red-400" : queueRunning ? "text-amber-400" : "text-zinc-500"
+                        )}>
+                          {runInfo?.status === "paused_login"
+                            ? "Giriş gerekli"
+                            : runInfo?.status === "stopping"
+                              ? "Duruyor…"
+                              : queueRunning
+                                ? "Aktif"
+                                : "Beklemede"}
                         </h4>
                       </div>
                     </div>
                   </div>
+
+                  {/* Sunucu kuyruk motoru bilgisi */}
+                  {runInfo && (runInfo.status === "paused_login" || queueRunning || runInfo.stale) && (
+                    <div
+                      data-testid="run-banner"
+                      className={cn(
+                        "mb-6 flex-shrink-0 rounded-2xl border px-4 py-3 text-xs leading-relaxed",
+                        runInfo.status === "paused_login"
+                          ? "border-red-500/30 bg-red-500/10 text-red-300"
+                          : "border-amber-400/20 bg-amber-400/5 text-amber-200"
+                      )}
+                    >
+                      {runInfo.status === "paused_login" ? (
+                        <p>
+                          <b>Sahibinden oturumu kapalı — kuyruk duraklatıldı.</b> Tarayıcıda giriş yaptıktan sonra
+                          “Devam Et”e basın. Bekleyen ilanlar korunuyor.
+                        </p>
+                      ) : queueRunning ? (
+                        <>
+                          <p>
+                            <b>Kuyruk sunucuda çalışıyor</b>
+                            {runInfo.ownedHere ? "" : runInfo.ownerLabel ? ` (${runInfo.ownerLabel})` : ""} — bu sekmeyi
+                            kapatsanız da sürer.
+                            {runInfo.currentTitle ? <> Şu an: <b>{runInfo.currentTitle}</b>.</> : null}{" "}
+                            {runInfo.processed > 0 ? `İşlenen: ${runInfo.processed} (başarılı ${runInfo.success}, hatalı ${runInfo.failed}).` : ""}
+                            {runInfo.status === "stopping" ? " Mevcut ilan bitince duracak." : ""}
+                          </p>
+                          {runLogs.length > 0 && (
+                            <div className="mt-2">
+                              <button
+                                type="button"
+                                onClick={() => setShowRunLogs((v) => !v)}
+                                className="text-[10px] font-bold uppercase tracking-widest text-amber-300/80 hover:text-amber-200"
+                              >
+                                {showRunLogs ? "Adım loglarını gizle" : "Son adım logları"}
+                              </button>
+                              {showRunLogs && (
+                                <pre data-testid="run-logs" className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded-xl bg-black/30 p-3 font-mono text-[10px] leading-snug text-zinc-400">
+                                  {runLogs.slice(-25).join("\n")}
+                                </pre>
+                              )}
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <p>
+                          Kuyruğun önceki çalışması yarım kalmış görünüyor
+                          {runInfo.heartbeatAgeSec != null ? ` (son sinyal ${runInfo.heartbeatAgeSec} sn önce)` : ""}.
+                          “Devam Et”e basınca yarım kalan ilan yayın loguna bakılarak çözülür; yayınlanmış olabilecekler
+                          tekrar yayınlanmaz.
+                        </p>
+                      )}
+                    </div>
+                  )}
 
                   {/* Publish Queue Table */}
                   <PublishQueue
@@ -579,8 +718,10 @@ export default function Home() {
                 </>
               )}
             </>
-          ) : activeView === "whatsapp" ? (
-            <WhatsAppDashboard />
+          ) : activeView === "history" ? (
+            <PublishHistory />
+          ) : activeView === "catalog" ? (
+            <CatalogManager />
           ) : (
             <BotSettings />
           )}
@@ -642,16 +783,7 @@ export default function Home() {
                 onClose={() => setIsBulkModalOpen(false)}
                 onAdd={(newItems) => {
                   console.log(`[QUEUE] 📦 ${newItems.length} adet toplu ilan ekleniyor...`);
-                  newItems.forEach(item => {
-                    const queueItem: QueueItem = {
-                      id: `q_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-                      draft: item.draft,
-                      preview: item.preview,
-                      status: "pending",
-                      addedAt: new Date().toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" }),
-                    };
-                    setQueueItems(prev => [...prev, queueItem]);
-                  });
+                  addItemsToQueue(newItems);
                   toast.success(`${newItems.length} adet ilan kuyruğa eklendi!`);
                 }}
               />

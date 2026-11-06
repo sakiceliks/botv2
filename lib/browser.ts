@@ -17,6 +17,32 @@ export function getUserDataDir() {
   return path.isAbsolute(configured) ? configured : path.join(process.cwd(), configured);
 }
 
+// Paylaşılan launch flag'leri — puppeteer.launch ve manuel spawn (browser-session)
+// aynı profili/paylaşımlı portu kullandığı için tutarlı olmalı.
+// Bilinçli olarak YOK: --single-process (macOS crash), --no-zygote, --no-sandbox
+// (girişli profilde güvenlik riski).
+export const BROWSER_LAUNCH_FLAGS: string[] = [
+  "--disable-extensions",
+  // Bellek / render
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
+  // Arka plan kısıtlamaları — otomasyon arka plandayken yavaşlamasın
+  "--disable-background-timer-throttling",
+  "--disable-backgrounding-occluded-windows",
+  "--disable-renderer-backgrounding",
+  // Gereksiz ilk çalıştırma & servisler
+  "--no-first-run",
+  "--no-default-browser-check",
+  "--mute-audio",
+  "--disable-background-networking",
+  "--disable-component-update",
+  "--disable-sync",
+  "--disable-translate",
+  "--metrics-recording-only",
+  "--disable-breakpad",
+  "--disable-client-side-phishing-detection",
+];
+
 const BROWSER_PATHS: Record<string, string> = {
   "macos-brave":    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
   "macos-chrome":   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { motion } from "framer-motion";
 import {
   FolderOpen,
@@ -22,13 +22,14 @@ import {
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import {
-  BRANDS,
-  SLOGANS,
   DEFAULT_DESCRIPTION,
   TOWNS,
   STORAGE_CAPACITIES,
-  getColorsForModel,
+  getSlogansFor,
+  buildListingTitle,
+  getStorageForModel,
 } from "@/lib/manual-data";
+import { useCatalog } from "@/hooks/use-catalog";
 import type { ListingDraft } from "@/lib/types";
 import { getPriceRangeForModel } from "@/lib/price-utils";
 import type { BotSettings } from "@/lib/settings";
@@ -40,29 +41,52 @@ interface ManualListingFormProps {
 }
 
 export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: ManualListingFormProps) {
+  const { activeBrands, getColorsForModel } = useCatalog();
   const [imagePath, setImagePath] = useState("");
   const [pathError, setPathError] = useState<string | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [isValidatingPath, setIsValidatingPath] = useState(false);
-  const [selectedBrand, setSelectedBrand] = useState(BRANDS[0].name);
-  const [selectedModel, setSelectedModel] = useState(BRANDS[0].models[0]);
-  const [selectedSlogan, setSelectedSlogan] = useState(SLOGANS[1]);
+  const [selectedBrand, setSelectedBrand] = useState("");
+  const [selectedModel, setSelectedModel] = useState("");
+  const [selectedSlogan, setSelectedSlogan] = useState("");
 
   const [selectedTown, setSelectedTown] = useState("");
   const [selectedColor, setSelectedColor] = useState("");
-  const [selectedStorage, setSelectedStorage] = useState("256 GB");
+  const [selectedCondition, setSelectedCondition] = useState("Sıfır");
+  const [selectedStorage, setSelectedStorage] = useState(getStorageForModel(""));
   const [selectedPrice, setSelectedPrice] = useState("48000");
 
   const [description, setDescription] = useState(DEFAULT_DESCRIPTION);
   const [isUploading, setIsUploading] = useState(false);
   const [isAddingToQueue, setIsAddingToQueue] = useState(false);
 
+  // Katalog yüklenince ilk aktif marka/modeli seç
+  useEffect(() => {
+    if (activeBrands.length === 0) return;
+    const brandEntry = activeBrands.find((b) => b.name === selectedBrand);
+    if (!brandEntry) {
+      const first = activeBrands[0];
+      const firstModel = first.models.find((m) => m.active)?.name ?? first.models[0]?.name ?? "";
+      setSelectedBrand(first.name);
+      setSelectedModel(firstModel);
+      setSelectedStorage(getStorageForModel(firstModel));
+      return;
+    }
+    if (selectedModel && !brandEntry.models.some((m) => m.name === selectedModel)) {
+      const firstModel = brandEntry.models.find((m) => m.active)?.name ?? "";
+      setSelectedModel(firstModel);
+      setSelectedStorage(getStorageForModel(firstModel));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBrands]);
+
   const applyPriceFromSettings = (brand: string, model: string) => {
     fetch("/api/settings")
       .then((r) => r.json())
       .then((data: { ok: boolean; settings: BotSettings }) => {
         if (data.ok) {
-          const { min, max } = getPriceRangeForModel(data.settings, brand, model);
+          setSelectedCondition(data.settings.defaultCondition || "Sıfır");
+          const { min, max } = getPriceRangeForModel(data.settings.modelPriceRanges, brand, model);
           const raw = min + Math.floor(Math.random() * (max - min + 1));
           setSelectedPrice(String(Math.round(raw / 10) * 10));
         }
@@ -110,24 +134,38 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
     }
   };
 
+  const sloganPool = useMemo(
+    () => getSlogansFor(selectedBrand, selectedModel),
+    [selectedBrand, selectedModel]
+  );
+
+  useEffect(() => {
+    setSelectedSlogan((prev) => (sloganPool.includes(prev) ? prev : sloganPool[0] ?? ""));
+  }, [sloganPool]);
+
   const handleBrandChange = (brandName: string) => {
     setSelectedBrand(brandName);
-    const brand = BRANDS.find((b) => b.name === brandName);
-    const firstModel = brand?.models[0] ?? selectedModel;
+    const brand = activeBrands.find((b) => b.name === brandName);
+    const firstModel = brand?.models.find((m) => m.active)?.name ?? brand?.models[0]?.name ?? selectedModel;
     if (brand && brand.models.length > 0) setSelectedModel(firstModel);
+    setSelectedStorage(getStorageForModel(firstModel));
     applyPriceFromSettings(brandName, firstModel);
   };
 
   const handleModelChange = (model: string) => {
     setSelectedModel(model);
+    setSelectedStorage(getStorageForModel(model));
     applyPriceFromSettings(selectedBrand, model);
   };
 
   const buildDraft = (imageUrl: string, imagePath: string): ListingDraft => {
-    const nameParts = [selectedSlogan, selectedModel];
-    if (selectedStorage) nameParts.push(selectedStorage);
-    if (selectedColor) nameParts.push(selectedColor);
-    const listingName = nameParts.join(" ").toUpperCase();
+    const listingName = buildListingTitle(
+      selectedSlogan,
+      selectedModel,
+      selectedStorage,
+      selectedColor,
+      selectedCondition
+    );
 
     return {
       _id: `draft_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -139,7 +177,7 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
       product: selectedModel,
       productType: "Akıllı Telefon",
       vehicleType: selectedBrand,
-      condition: "Sıfır",
+      condition: selectedCondition || "Sıfır",
       category: "Cep Telefonu",
       partCategory: selectedModel,
       price: Number(selectedPrice) || 45000,
@@ -211,7 +249,7 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
 
         setImagePath("");
         setPreview(null);
-        setSelectedStorage("256 GB");
+        setSelectedStorage(getStorageForModel(selectedModel));
         setSelectedColor("");
         setSelectedTown("");
         setSelectedPrice(String(Math.round((52000 + Math.floor(Math.random() * 2001)) / 10) * 10));
@@ -316,7 +354,7 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
                 onChange={(e) => handleBrandChange(e.target.value)}
                 className={selectBase}
               >
-                {BRANDS.map(brand => (
+                {activeBrands.map(brand => (
                   <option key={brand.name} value={brand.name} className="bg-zinc-900">{brand.name}</option>
                 ))}
               </select>
@@ -334,8 +372,8 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
                 onChange={(e) => handleModelChange(e.target.value)}
                 className={selectBase}
               >
-                {BRANDS.find(b => b.name === selectedBrand)?.models.map(model => (
-                  <option key={model} value={model} className="bg-zinc-900">{model}</option>
+                {activeBrands.find(b => b.name === selectedBrand)?.models.filter(m => m.active).map(model => (
+                  <option key={model.name} value={model.name} className="bg-zinc-900">{model.name}</option>
                 ))}
               </select>
               <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 pointer-events-none" />
@@ -417,25 +455,47 @@ export function ManualListingForm({ onDraftCreated, onAddToQueue, onCancel }: Ma
           </div>
         </div>
 
-        <div className="space-y-2">
-          <label className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 flex items-center gap-2">
-            <Type className="w-3 h-3" /> Başlık Sloganı
-          </label>
-          <div className="relative">
-            <select
-              value={selectedSlogan}
-              onChange={(e) => setSelectedSlogan(e.target.value)}
-              className={selectBase}
-            >
-              {SLOGANS.map(slogan => (
-                <option key={slogan} value={slogan} className="bg-zinc-900">{slogan}</option>
-              ))}
-            </select>
-            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 pointer-events-none" />
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <label className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 flex items-center gap-2">
+              <Type className="w-3 h-3" /> Durum
+            </label>
+            <div className="relative">
+              <select
+                value={selectedCondition}
+                onChange={(e) => setSelectedCondition(e.target.value)}
+                className={selectBase}
+              >
+                <option value="Sıfır" className="bg-zinc-900">Sıfır</option>
+                <option value="İkinci El" className="bg-zinc-900">İkinci El</option>
+              </select>
+              <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 pointer-events-none" />
+            </div>
           </div>
+
+          <div className="space-y-2">
+            <label className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 flex items-center gap-2">
+              <Type className="w-3 h-3" /> Başlık Sloganı
+            </label>
+            <div className="relative">
+              <select
+                value={selectedSlogan}
+                onChange={(e) => setSelectedSlogan(e.target.value)}
+                className={selectBase}
+              >
+                {sloganPool.map(slogan => (
+                  <option key={slogan} value={slogan} className="bg-zinc-900">{slogan}</option>
+                ))}
+              </select>
+              <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 pointer-events-none" />
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-2">
           <p className="text-[11px] text-zinc-600 italic">
             Oluşturulacak Başlık: <span className="text-[#11F08E] font-bold">
-              {[selectedSlogan, selectedModel, selectedStorage].filter(Boolean).join(" ").toUpperCase()}
+              {buildListingTitle(selectedSlogan, selectedModel, selectedStorage, selectedColor, selectedCondition)}
             </span>
           </p>
         </div>

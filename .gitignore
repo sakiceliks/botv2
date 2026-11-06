@@ -1,2 +1,6 @@
 .next
 node_modules
+
+# mock-image yenileme durumu (images.py tarafından üretilir)
+mock-image/_source/
+mock-image/.refresh.json
